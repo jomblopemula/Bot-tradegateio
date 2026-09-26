@@ -1,0 +1,7 @@
+flutter create --org com.neurobro --project-name gateio_smc_pro .
+# Copy this package's pubspec.yaml, lib/, and test/ into the generated project.
+flutter pub get
+dart format lib test
+flutter analyze
+flutter test
+flutter build apk --release

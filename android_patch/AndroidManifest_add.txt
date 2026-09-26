@@ -1,0 +1,5 @@
+Add this line directly inside <manifest ...> in android/app/src/main/AndroidManifest.xml:
+
+<uses-permission android:name="android.permission.INTERNET"/>
+
+Do not replace the whole manifest if you do not need to.
