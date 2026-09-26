@@ -25,8 +25,9 @@ class GateApi {
   }) : _client = client ?? http.Client();
 
   String get base =>
-      testnet ? 'https://api-testnet.gateapi.io/api/v4'
-              : 'https://api.gateio.ws/api/v4';
+    testnet
+        ? 'https://fx-api-testnet.gateio.ws/api/v4'
+        : 'https://fx-api.gateio.ws/api/v4';
 
   String _sha512(String s) => sha512.convert(utf8.encode(s)).toString();
 
