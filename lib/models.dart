@@ -13,7 +13,7 @@ class Candle {
 
   factory Candle.fromGate(Map<String, dynamic> j) => Candle(
         time: DateTime.fromMillisecondsSinceEpoch(
-            (double.tryParse('${j['t']}') ?? 0) * 1000,
+            ((double.tryParse('${j['t']}') ?? 0) * 1000).round(),
             isUtc: true),
         open: double.parse('${j['o']}'),
         high: double.parse('${j['h']}'),
