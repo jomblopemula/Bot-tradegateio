@@ -27,6 +27,22 @@ jobs:
       - name: Generate Android project
         run: flutter create . --platforms=android --project-name gateio_smc_pro
 
+      - name: Fix generated widget test
+        run: |
+          cat > test/widget_test.dart <<'EOF'
+          import 'package:flutter_test/flutter_test.dart';
+          import 'package:gateio_smc_pro/main.dart';
+
+          void main() {
+            testWidgets('GateIO SMC app loads', (WidgetTester tester) async {
+              await tester.pumpWidget(const GateSmcApp());
+
+              expect(find.byType(GateSmcApp), findsOneWidget);
+              expect(find.text('Gate.io SMC PRO'), findsOneWidget);
+            });
+          }
+          EOF
+
       - name: Get dependencies
         run: flutter pub get
 
