@@ -1,10 +1,11 @@
 import 'dart:convert';
+import 'dart:io';
 import 'dart:math';
 
 import 'package:http/http.dart' as http;
 
-import '../lib/models.dart';
-import '../lib/smc_engine.dart';
+import 'package:gateio_smc_pro/models.dart';
+import 'package:gateio_smc_pro/smc_engine.dart';
 
 const base = 'https://fx-api.gateio.ws/api/v4';
 const contractName = 'BTC_USDT';
@@ -148,14 +149,14 @@ Future<void> main() async {
   final total = wins + losses;
   final elapsedDays = days.toDouble();
   final tradesPerDay = total / elapsedDays;
-  print('BACKTEST $contractName 15m ${start.toIso8601String()} -> ${end.toIso8601String()}');
-  print('Initial equity: ${money(initialEquity)} USDT');
-  print('Final equity: ${money(equity)} USDT');
-  print('Return: ${money((equity / initialEquity - 1) * 100)}%');
-  print('Trades: $total ($wins wins, $losses losses, $skipped skipped)');
-  print('Win rate: ${total == 0 ? '0.00' : money(wins * 100 / total)}%');
-  print('Average trades/day: ${money(tradesPerDay)} (requested target: 50)');
-  print('Max drawdown: ${money(maxDrawdown * 100)}%');
-  print('First trade: ${trades.isEmpty ? 'none' : trades.first}');
-  print('Last trade: ${trades.isEmpty ? 'none' : trades.last}');
+  stdout.writeln('BACKTEST $contractName 15m ${start.toIso8601String()} -> ${end.toIso8601String()}');
+  stdout.writeln('Initial equity: ${money(initialEquity)} USDT');
+  stdout.writeln('Final equity: ${money(equity)} USDT');
+  stdout.writeln('Return: ${money((equity / initialEquity - 1) * 100)}%');
+  stdout.writeln('Trades: $total ($wins wins, $losses losses, $skipped skipped)');
+  stdout.writeln('Win rate: ${total == 0 ? '0.00' : money(wins * 100 / total)}%');
+  stdout.writeln('Average trades/day: ${money(tradesPerDay)} (requested target: 50)');
+  stdout.writeln('Max drawdown: ${money(maxDrawdown * 100)}%');
+  stdout.writeln('First trade: ${trades.isEmpty ? 'none' : trades.first}');
+  stdout.writeln('Last trade: ${trades.isEmpty ? 'none' : trades.last}');
 }
