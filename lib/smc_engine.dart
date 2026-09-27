@@ -35,7 +35,7 @@ class SmcEngine {
     required double riskPercent,
     required double rr,
   }) {
-    if (candles.length < 80 || equity <= 0) return null;
+    if (candles.length < 80) return null;
 
     // Ignore the newest candle so the signal is based on a closed bar.
     final c = candles.sublist(0, candles.length - 1);

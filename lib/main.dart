@@ -428,6 +428,14 @@ class _HomePageState extends State<HomePage> {
             continue;
           }
 
+          if (equity <= 0) {
+            log(
+              'ORDER SKIPPED ${signal.contract}: '
+              'equity belum tersedia',
+            );
+            continue;
+          }
+
           // ----------------------------------------------------
           // MAX POSITION CHECK
           // ----------------------------------------------------
