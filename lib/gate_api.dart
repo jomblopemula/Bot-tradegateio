@@ -97,7 +97,11 @@ class GateApi {
     final data = await _request('GET', '/futures/usdt/contracts');
     return (data as List)
         .map((e) => ContractInfo.fromJson(e as Map<String, dynamic>))
-        .where((c) => c.state == 'normal' || c.state == 'true')
+        .where((c) =>
+            c.state == 'normal' ||
+            c.state == 'trading' ||
+            c.state == 'true' ||
+            c.state == 'false')
         .toList();
   }
 

@@ -329,6 +329,7 @@ class _HomePageState extends State<HomePage> {
       // --------------------------------------------------------
 
       final list = await api!.contracts();
+      log('Market scan: ${list.length} active contracts');
 
       // --------------------------------------------------------
       // GET POSITIONS
