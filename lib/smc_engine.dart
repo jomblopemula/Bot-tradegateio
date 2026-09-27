@@ -49,7 +49,9 @@ class SmcEngine {
     final look = min(20, c.length - 3);
     var priorHigh = -double.infinity;
     var priorLow = double.infinity;
-    for (var i = c.length - look - 1; i < c.length - 1; i++) {
+    final priorStart = max(0, c.length - look - 2);
+    final priorEnd = c.length - 2;
+    for (var i = priorStart; i < priorEnd; i++) {
       priorHigh = max(priorHigh, c[i].high);
       priorLow = min(priorLow, c[i].low);
     }
