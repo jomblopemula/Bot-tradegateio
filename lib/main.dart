@@ -5,6 +5,8 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import 'gate_api.dart';
 import 'models.dart';
+import 'notification_service.dart';
+import 'smc_chart.dart';
 import 'smc_engine.dart';
 
 void main() {
@@ -58,6 +60,8 @@ class _HomePageState extends State<HomePage> {
   bool testnet = true;
   bool dryRun = true;
   bool running = false;
+  bool notificationsEnabled = true;
+  bool notificationPermissionGranted = false;
 
   int leverage = 15;
 
@@ -70,9 +74,12 @@ class _HomePageState extends State<HomePage> {
   GateApi? api;
 
   final engine = const SmcEngine();
+  final notificationService = NotificationService();
 
   final logs = <String>[];
   final signals = <Signal>[];
+  final chartSnapshots = <_ChartSnapshot>[];
+  String? selectedChartId;
 
   List<PositionInfo> positions = [];
 
@@ -105,6 +112,14 @@ class _HomePageState extends State<HomePage> {
 
     testnet = (await storage.read(key: 'testnet')) != 'false';
     dryRun = (await storage.read(key: 'dry_run')) != 'false';
+    notificationsEnabled =
+        (await storage.read(key: 'notifications_enabled')) != 'false';
+
+    await notificationService.initialize();
+    if (notificationsEnabled) {
+      notificationPermissionGranted = await notificationService
+          .requestPermission();
+    }
 
     if (!mounted) return;
 
@@ -124,25 +139,13 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> saveAndTest() async {
     try {
-      await storage.write(
-        key: 'api_key',
-        value: apiKey.text.trim(),
-      );
+      await storage.write(key: 'api_key', value: apiKey.text.trim());
 
-      await storage.write(
-        key: 'api_secret',
-        value: apiSecret.text.trim(),
-      );
+      await storage.write(key: 'api_secret', value: apiSecret.text.trim());
 
-      await storage.write(
-        key: 'testnet',
-        value: '$testnet',
-      );
+      await storage.write(key: 'testnet', value: '$testnet');
 
-      await storage.write(
-        key: 'dry_run',
-        value: '$dryRun',
-      );
+      await storage.write(key: 'dry_run', value: '$dryRun');
 
       api?.dispose();
 
@@ -156,23 +159,17 @@ class _HomePageState extends State<HomePage> {
 
       final acc = await api!.futuresAccount();
 
-      equity = double.tryParse(
-            '${acc['total'] ?? acc['available'] ?? 0}',
-          ) ??
-          0;
+      equity = double.tryParse('${acc['total'] ?? acc['available'] ?? 0}') ?? 0;
 
       positions = await api!.positions();
 
       if (!mounted) return;
 
       setState(() {
-        status =
-            'Terhubung • Equity ${equity.toStringAsFixed(2)} USDT';
+        status = 'Terhubung • Equity ${equity.toStringAsFixed(2)} USDT';
       });
 
-      log(
-        'Connection OK • ${testnet ? 'TESTNET' : 'LIVE'}',
-      );
+      log('Connection OK • ${testnet ? 'TESTNET' : 'LIVE'}');
     } catch (e) {
       if (!mounted) return;
 
@@ -242,7 +239,8 @@ class _HomePageState extends State<HomePage> {
     // ----------------------------------------------------------
 
     if (!settings.dryRun && settings.testnet == false) {
-      final ok = await showDialog<bool>(
+      final ok =
+          await showDialog<bool>(
             context: context,
             builder: (dialogContext) {
               return AlertDialog(
@@ -305,9 +303,7 @@ class _HomePageState extends State<HomePage> {
     // ----------------------------------------------------------
 
     timer = Timer.periodic(
-      Duration(
-        seconds: settings.scanSeconds.clamp(15, 3600),
-      ),
+      Duration(seconds: settings.scanSeconds.clamp(15, 3600)),
       (_) {
         scanOnce();
       },
@@ -350,9 +346,7 @@ class _HomePageState extends State<HomePage> {
       final limit = settings.maxPositions;
 
       if (active >= limit) {
-        log(
-          'Max positions reached: $active/$limit',
-        );
+        log('Max positions reached: $active/$limit');
 
         return;
       }
@@ -369,9 +363,7 @@ class _HomePageState extends State<HomePage> {
         }
 
         // Jangan entry contract yang sudah punya posisi
-        if (positions.any(
-          (p) => p.contract == c.name,
-        )) {
+        if (positions.any((p) => p.contract == c.name)) {
           continue;
         }
 
@@ -380,10 +372,7 @@ class _HomePageState extends State<HomePage> {
           // GET CANDLES
           // ----------------------------------------------------
 
-          final candles = await api!.candles(
-            c.name,
-            settings.interval,
-          );
+          final candles = await api!.candles(c.name, settings.interval);
 
           // ----------------------------------------------------
           // SMC ENGINE
@@ -408,8 +397,19 @@ class _HomePageState extends State<HomePage> {
 
           signals.insert(0, signal);
 
+          final chartSnapshot = _ChartSnapshot(
+            id: '${signal.contract}-${DateTime.now().microsecondsSinceEpoch}',
+            signal: signal,
+            candles: List.unmodifiable(candles),
+          );
+          chartSnapshots.insert(0, chartSnapshot);
+          selectedChartId = chartSnapshot.id;
+
           if (signals.length > 30) {
             signals.removeLast();
+          }
+          if (chartSnapshots.length > 30) {
+            chartSnapshots.removeLast();
           }
 
           log(
@@ -419,6 +419,14 @@ class _HomePageState extends State<HomePage> {
             'TP ${signal.tp} '
             'score ${signal.score}%',
           );
+
+          if (notificationsEnabled && notificationPermissionGranted) {
+            try {
+              await notificationService.showSignal(signal);
+            } catch (e) {
+              log('NOTIFICATION ERROR: $e');
+            }
+          }
 
           // ----------------------------------------------------
           // DRY RUN
@@ -448,17 +456,13 @@ class _HomePageState extends State<HomePage> {
           // SET ISOLATED LEVERAGE
           // ----------------------------------------------------
 
-          await api!.setIsolatedLeverage(
-            signal.contract,
-            settings.leverage,
-          );
+          await api!.setIsolatedLeverage(signal.contract, settings.leverage);
 
           // ----------------------------------------------------
           // ORDER SIZE
           // ----------------------------------------------------
 
-          final signedSize =
-              signal.side == 'BUY' ? signal.size : -signal.size;
+          final signedSize = signal.side == 'BUY' ? signal.size : -signal.size;
 
           final id =
               't-smc-${DateTime.now().millisecondsSinceEpoch % 100000000}';
@@ -486,9 +490,7 @@ class _HomePageState extends State<HomePage> {
 
           positions = await api!.positions();
         } catch (e) {
-          log(
-            'SCAN ${c.name}: $e',
-          );
+          log('SCAN ${c.name}: $e');
         }
 
         if (positions.length >= settings.maxPositions) {
@@ -504,9 +506,7 @@ class _HomePageState extends State<HomePage> {
 
       setState(() {});
     } catch (e) {
-      log(
-        'BOT ERROR: $e',
-      );
+      log('BOT ERROR: $e');
     }
   }
 
@@ -537,41 +537,25 @@ class _HomePageState extends State<HomePage> {
   @override
   Widget build(BuildContext context) {
     return DefaultTabController(
-      length: 4,
+      length: 5,
       child: Scaffold(
         appBar: AppBar(
-          title: const Text(
-            'Gate.io SMC PRO',
-          ),
+          title: const Text('Gate.io SMC PRO'),
           actions: [
             Icon(
-              running
-                  ? Icons.play_circle
-                  : Icons.stop_circle,
-              color: running
-                  ? Colors.greenAccent
-                  : Colors.redAccent,
+              running ? Icons.play_circle : Icons.stop_circle,
+              color: running ? Colors.greenAccent : Colors.redAccent,
             ),
             const SizedBox(width: 12),
           ],
           bottom: const TabBar(
+            isScrollable: true,
             tabs: [
-              Tab(
-                icon: Icon(Icons.dashboard),
-                text: 'Dashboard',
-              ),
-              Tab(
-                icon: Icon(Icons.candlestick_chart),
-                text: 'Signals',
-              ),
-              Tab(
-                icon: Icon(Icons.account_balance_wallet),
-                text: 'Positions',
-              ),
-              Tab(
-                icon: Icon(Icons.settings),
-                text: 'Settings',
-              ),
+              Tab(icon: Icon(Icons.dashboard), text: 'Dashboard'),
+              Tab(icon: Icon(Icons.candlestick_chart), text: 'Signals'),
+              Tab(icon: Icon(Icons.show_chart), text: 'Chart'),
+              Tab(icon: Icon(Icons.account_balance_wallet), text: 'Positions'),
+              Tab(icon: Icon(Icons.settings), text: 'Settings'),
             ],
           ),
         ),
@@ -579,6 +563,7 @@ class _HomePageState extends State<HomePage> {
           children: [
             _dashboard(),
             _signals(),
+            _chart(),
             _positions(),
             _settings(),
           ],
@@ -599,8 +584,7 @@ class _HomePageState extends State<HomePage> {
         children: [
           _card(
             Column(
-              crossAxisAlignment:
-                  CrossAxisAlignment.start,
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
                   status,
@@ -621,17 +605,9 @@ class _HomePageState extends State<HomePage> {
                       ),
                     ),
                     Expanded(
-                      child: _metric(
-                        'Risk',
-                        '${settings.riskPercent}%',
-                      ),
+                      child: _metric('Risk', '${settings.riskPercent}%'),
                     ),
-                    Expanded(
-                      child: _metric(
-                        'RR',
-                        '1:${settings.rr}',
-                      ),
-                    ),
+                    Expanded(child: _metric('RR', '1:${settings.rr}')),
                   ],
                 ),
               ],
@@ -643,17 +619,12 @@ class _HomePageState extends State<HomePage> {
           // ----------------------------------------------------
           // MODE
           // ----------------------------------------------------
-
           _card(
             Column(
               children: [
                 SwitchListTile(
                   title: const Text('TESTNET'),
-                  subtitle: Text(
-                    testnet
-                        ? 'Gate testnet'
-                        : 'Gate LIVE',
-                  ),
+                  subtitle: Text(testnet ? 'Gate testnet' : 'Gate LIVE'),
                   value: testnet,
                   onChanged: (value) {
                     setState(() {
@@ -665,9 +636,7 @@ class _HomePageState extends State<HomePage> {
                 SwitchListTile(
                   title: const Text('DRY-RUN'),
                   subtitle: Text(
-                    dryRun
-                        ? 'Tidak mengirim order'
-                        : 'Order diizinkan',
+                    dryRun ? 'Tidak mengirim order' : 'Order diizinkan',
                   ),
                   value: dryRun,
                   onChanged: (value) {
@@ -683,16 +652,8 @@ class _HomePageState extends State<HomePage> {
                   width: double.infinity,
                   child: FilledButton.icon(
                     onPressed: toggleBot,
-                    icon: Icon(
-                      running
-                          ? Icons.stop
-                          : Icons.play_arrow,
-                    ),
-                    label: Text(
-                      running
-                          ? 'STOP BOT'
-                          : 'START BOT',
-                    ),
+                    icon: Icon(running ? Icons.stop : Icons.play_arrow),
+                    label: Text(running ? 'STOP BOT' : 'START BOT'),
                   ),
                 ),
               ],
@@ -704,17 +665,13 @@ class _HomePageState extends State<HomePage> {
           // ----------------------------------------------------
           // ENGINE
           // ----------------------------------------------------
-
           _card(
             Column(
-              crossAxisAlignment:
-                  CrossAxisAlignment.start,
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 const Text(
                   'Engine',
-                  style: TextStyle(
-                    fontWeight: FontWeight.bold,
-                  ),
+                  style: TextStyle(fontWeight: FontWeight.bold),
                 ),
 
                 const SizedBox(height: 8),
@@ -751,43 +708,26 @@ class _HomePageState extends State<HomePage> {
           // ----------------------------------------------------
           // LOG
           // ----------------------------------------------------
-
           _card(
             Column(
-              crossAxisAlignment:
-                  CrossAxisAlignment.start,
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 const Text(
                   'Log',
-                  style: TextStyle(
-                    fontWeight: FontWeight.bold,
-                  ),
+                  style: TextStyle(fontWeight: FontWeight.bold),
                 ),
 
                 const SizedBox(height: 8),
 
                 if (logs.isEmpty)
-                  const Text(
-                    'Belum ada log.',
-                  )
+                  const Text('Belum ada log.')
                 else
-                  ...logs.take(12).map(
-                    (entry) {
-                      return Padding(
-                        padding:
-                            const EdgeInsets.only(
-                          bottom: 4,
-                        ),
-                        child: Text(
-                          entry,
-                          style:
-                              const TextStyle(
-                            fontSize: 11,
-                          ),
-                        ),
-                      );
-                    },
-                  ),
+                  ...logs.take(12).map((entry) {
+                    return Padding(
+                      padding: const EdgeInsets.only(bottom: 4),
+                      child: Text(entry, style: const TextStyle(fontSize: 11)),
+                    );
+                  }),
               ],
             ),
           ),
@@ -802,11 +742,7 @@ class _HomePageState extends State<HomePage> {
 
   Widget _signals() {
     if (signals.isEmpty) {
-      return const Center(
-        child: Text(
-          'Belum ada signal.',
-        ),
-      );
+      return const Center(child: Text('Belum ada signal.'));
     }
 
     return ListView.builder(
@@ -817,9 +753,7 @@ class _HomePageState extends State<HomePage> {
 
         return Card(
           child: ListTile(
-            title: Text(
-              '${signal.side} • ${signal.contract}',
-            ),
+            title: Text('${signal.side} • ${signal.contract}'),
             subtitle: Text(
               'Entry ${signal.entry}\n'
               'SL ${signal.stop}  '
@@ -827,12 +761,88 @@ class _HomePageState extends State<HomePage> {
               'Risk ${signal.riskAmount.toStringAsFixed(3)} USDT '
               '• Size ${signal.size}',
             ),
-            trailing: Text(
-              '${signal.score}%',
-            ),
+            trailing: Text('${signal.score}%'),
           ),
         );
       },
+    );
+  }
+
+  Widget _chart() {
+    if (chartSnapshots.isEmpty) {
+      return const Center(
+        child: Text('Chart akan tersedia setelah bot menemukan signal.'),
+      );
+    }
+
+    final snapshot = chartSnapshots.firstWhere(
+      (item) => item.id == selectedChartId,
+      orElse: () => chartSnapshots.first,
+    );
+
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        DropdownButtonFormField<String>(
+          initialValue: snapshot.id,
+          decoration: const InputDecoration(labelText: 'Signal'),
+          items: chartSnapshots
+              .map(
+                (item) => DropdownMenuItem(
+                  value: item.id,
+                  child: Text('${item.signal.contract} • ${item.signal.side}'),
+                ),
+              )
+              .toList(),
+          onChanged: (value) {
+            setState(() => selectedChartId = value);
+          },
+        ),
+        const SizedBox(height: 12),
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                '${snapshot.signal.contract}  ${snapshot.signal.side}',
+                style: const TextStyle(fontWeight: FontWeight.bold),
+              ),
+            ),
+            Text('${snapshot.signal.score}%'),
+          ],
+        ),
+        const SizedBox(height: 8),
+        SizedBox(
+          height: 360,
+          child: SmcCandlestickChart(
+            candles: snapshot.candles,
+            signal: snapshot.signal,
+          ),
+        ),
+        const SizedBox(height: 12),
+        Wrap(
+          spacing: 16,
+          runSpacing: 8,
+          children: [
+            _chartLegend('Entry', const Color(0xFF4FC3F7)),
+            _chartLegend('Stop loss', const Color(0xFFFF6B6B)),
+            _chartLegend('Take profit', const Color(0xFF69DB7C)),
+            _chartLegend('EMA 200', const Color(0xFFFFD166)),
+          ],
+        ),
+        const SizedBox(height: 8),
+        Text(snapshot.signal.reasons.join(' • ')),
+      ],
+    );
+  }
+
+  Widget _chartLegend(String label, Color color) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(width: 9, height: 9, color: color),
+        const SizedBox(width: 5),
+        Text(label, style: const TextStyle(fontSize: 12)),
+      ],
     );
   }
 
@@ -842,11 +852,7 @@ class _HomePageState extends State<HomePage> {
 
   Widget _positions() {
     if (positions.isEmpty) {
-      return const Center(
-        child: Text(
-          'Tidak ada posisi aktif.',
-        ),
-      );
+      return const Center(child: Text('Tidak ada posisi aktif.'));
     }
 
     return ListView.builder(
@@ -857,9 +863,7 @@ class _HomePageState extends State<HomePage> {
 
         return Card(
           child: ListTile(
-            title: Text(
-              position.contract,
-            ),
+            title: Text(position.contract),
             subtitle: Text(
               'Size ${position.size} • '
               'Entry ${position.entryPrice}\n'
@@ -867,8 +871,7 @@ class _HomePageState extends State<HomePage> {
               '${position.marginMode}',
             ),
             trailing: Text(
-              position.unrealisedPnl
-                  .toStringAsFixed(4),
+              position.unrealisedPnl.toStringAsFixed(4),
               style: TextStyle(
                 color: position.unrealisedPnl >= 0
                     ? Colors.greenAccent
@@ -889,63 +892,56 @@ class _HomePageState extends State<HomePage> {
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
-        _field(
-          'Gate API Key',
-          apiKey,
-          obscure: true,
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          title: const Text('Notifikasi signal'),
+          subtitle: Text(
+            !notificationsEnabled
+                ? 'Nonaktif'
+                : notificationPermissionGranted
+                ? 'Peringatan SMC aktif'
+                : 'Izin notifikasi belum diberikan',
+          ),
+          value: notificationsEnabled,
+          onChanged: (value) async {
+            if (value) {
+              final granted = await notificationService.requestPermission();
+              if (!mounted) return;
+              if (!granted) {
+                setState(() => notificationPermissionGranted = false);
+                log('Izin notifikasi belum diberikan');
+                return;
+              }
+              notificationPermissionGranted = true;
+            }
+            await storage.write(key: 'notifications_enabled', value: '$value');
+            if (!mounted) return;
+            setState(() => notificationsEnabled = value);
+          },
         ),
 
-        _field(
-          'Gate API Secret',
-          apiSecret,
-          obscure: true,
-        ),
+        _field('Gate API Key', apiKey, obscure: true),
 
-        _field(
-          'Risk per position (%)',
-          risk,
-          keyboard: TextInputType.number,
-        ),
+        _field('Gate API Secret', apiSecret, obscure: true),
 
-        _field(
-          'Risk/Reward',
-          rr,
-          keyboard: TextInputType.number,
-        ),
+        _field('Risk per position (%)', risk, keyboard: TextInputType.number),
 
-        _field(
-          'Max positions',
-          maxPos,
-          keyboard: TextInputType.number,
-        ),
+        _field('Risk/Reward', rr, keyboard: TextInputType.number),
 
-        _field(
-          'Scan seconds',
-          scan,
-          keyboard: TextInputType.number,
-        ),
+        _field('Max positions', maxPos, keyboard: TextInputType.number),
+
+        _field('Scan seconds', scan, keyboard: TextInputType.number),
 
         // ------------------------------------------------------
         // LEVERAGE
         // ------------------------------------------------------
-
         DropdownButtonFormField<int>(
           initialValue: leverage,
-          decoration: const InputDecoration(
-            labelText: 'Isolated leverage',
-          ),
-          items: const [
-            5,
-            10,
-            15,
-            20,
-            25,
-          ]
+          decoration: const InputDecoration(labelText: 'Isolated leverage'),
+          items: const [5, 10, 15, 20, 25]
               .map(
-                (value) => DropdownMenuItem(
-                  value: value,
-                  child: Text('${value}x'),
-                ),
+                (value) =>
+                    DropdownMenuItem(value: value, child: Text('${value}x')),
               )
               .toList(),
           onChanged: (value) {
@@ -960,21 +956,12 @@ class _HomePageState extends State<HomePage> {
         // ------------------------------------------------------
         // ENVIRONMENT
         // ------------------------------------------------------
-
         DropdownButtonFormField<bool>(
           initialValue: testnet,
-          decoration: const InputDecoration(
-            labelText: 'Environment',
-          ),
+          decoration: const InputDecoration(labelText: 'Environment'),
           items: const [
-            DropdownMenuItem(
-              value: true,
-              child: Text('TESTNET'),
-            ),
-            DropdownMenuItem(
-              value: false,
-              child: Text('LIVE'),
-            ),
+            DropdownMenuItem(value: true, child: Text('TESTNET')),
+            DropdownMenuItem(value: false, child: Text('LIVE')),
           ],
           onChanged: (value) {
             setState(() {
@@ -988,21 +975,12 @@ class _HomePageState extends State<HomePage> {
         // ------------------------------------------------------
         // EXECUTION
         // ------------------------------------------------------
-
         DropdownButtonFormField<bool>(
           initialValue: dryRun,
-          decoration: const InputDecoration(
-            labelText: 'Execution',
-          ),
+          decoration: const InputDecoration(labelText: 'Execution'),
           items: const [
-            DropdownMenuItem(
-              value: true,
-              child: Text('DRY-RUN'),
-            ),
-            DropdownMenuItem(
-              value: false,
-              child: Text('SEND ORDERS'),
-            ),
+            DropdownMenuItem(value: true, child: Text('DRY-RUN')),
+            DropdownMenuItem(value: false, child: Text('SEND ORDERS')),
           ],
           onChanged: (value) {
             setState(() {
@@ -1016,15 +994,10 @@ class _HomePageState extends State<HomePage> {
         // ------------------------------------------------------
         // SAVE
         // ------------------------------------------------------
-
         FilledButton.icon(
           onPressed: saveAndTest,
-          icon: const Icon(
-            Icons.save,
-          ),
-          label: const Text(
-            'SAVE & TEST CONNECTION',
-          ),
+          icon: const Icon(Icons.save),
+          label: const Text('SAVE & TEST CONNECTION'),
         ),
 
         const SizedBox(height: 8),
@@ -1032,16 +1005,13 @@ class _HomePageState extends State<HomePage> {
         // ------------------------------------------------------
         // RISK WARNING
         // ------------------------------------------------------
-
         OutlinedButton(
           onPressed: () {
             showDialog(
               context: context,
               builder: (dialogContext) {
                 return AlertDialog(
-                  title: const Text(
-                    'Risk warning',
-                  ),
+                  title: const Text('Risk warning'),
                   content: const Text(
                     'Risk 2% dihitung dari equity '
                     'yang terbaca saat scan. '
@@ -1058,22 +1028,16 @@ class _HomePageState extends State<HomePage> {
                   actions: [
                     TextButton(
                       onPressed: () {
-                        Navigator.pop(
-                          dialogContext,
-                        );
+                        Navigator.pop(dialogContext);
                       },
-                      child: const Text(
-                        'OK',
-                      ),
+                      child: const Text('OK'),
                     ),
                   ],
                 );
               },
             );
           },
-          child: const Text(
-            'Lihat aturan risiko',
-          ),
+          child: const Text('Lihat aturan risiko'),
         ),
       ],
     );
@@ -1090,9 +1054,7 @@ class _HomePageState extends State<HomePage> {
     TextInputType? keyboard,
   }) {
     return Padding(
-      padding: const EdgeInsets.only(
-        bottom: 12,
-      ),
+      padding: const EdgeInsets.only(bottom: 12),
       child: TextField(
         controller: controller,
         obscureText: obscure,
@@ -1109,27 +1071,13 @@ class _HomePageState extends State<HomePage> {
   // METRIC
   // ============================================================
 
-  Widget _metric(
-    String title,
-    String value,
-  ) {
+  Widget _metric(String title, String value) {
     return Column(
-      crossAxisAlignment:
-          CrossAxisAlignment.start,
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          title,
-          style: const TextStyle(
-            fontSize: 11,
-          ),
-        ),
+        Text(title, style: const TextStyle(fontSize: 11)),
         const SizedBox(height: 3),
-        Text(
-          value,
-          style: const TextStyle(
-            fontWeight: FontWeight.bold,
-          ),
-        ),
+        Text(value, style: const TextStyle(fontWeight: FontWeight.bold)),
       ],
     );
   }
@@ -1141,10 +1089,19 @@ class _HomePageState extends State<HomePage> {
   Widget _card(Widget child) {
     return Card(
       elevation: 0,
-      child: Padding(
-        padding: const EdgeInsets.all(14),
-        child: child,
-      ),
+      child: Padding(padding: const EdgeInsets.all(14), child: child),
     );
   }
+}
+
+class _ChartSnapshot {
+  final String id;
+  final Signal signal;
+  final List<Candle> candles;
+
+  const _ChartSnapshot({
+    required this.id,
+    required this.signal,
+    required this.candles,
+  });
 }

@@ -23,6 +23,7 @@ A Flutter Android dashboard for Gate.io USDT perpetual futures.
 - Testnet/live connection check.
 - Optional order submission with exchange-side TP/SL trigger fields.
 - Logs, positions and signal history.
+- Local phone notifications for new SMC signals, including in DRY-RUN mode.
 - Flutter test included.
 
 ## Important
@@ -74,8 +75,9 @@ In:
 Inside `<manifest ...>` add:
 
     <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
 
-Flutter Android templates normally already include it for debug; keep it explicit for release.
+Keep the Internet permission explicit for release. The app requests notification permission on first launch, and the notification switch is available in Settings.
 
 ## 4. Build debug APK
 
