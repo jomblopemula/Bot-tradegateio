@@ -33,18 +33,18 @@ jobs:
           grep -q 'android.permission.INTERNET' "$manifest" || \
             sed -i '/<manifest /a\    <uses-permission android:name="android.permission.INTERNET"/>' "$manifest"
 
-      - name: Fix generated widget test
+      - name: Ensure application widget test
         run: |
           cat > test/widget_test.dart <<'EOF'
           import 'package:flutter_test/flutter_test.dart';
           import 'package:gateio_smc_pro/main.dart';
 
           void main() {
-            testWidgets('GateIO SMC app loads', (WidgetTester tester) async {
+            testWidgets('SMC Futures AI Trader app loads', (WidgetTester tester) async {
               await tester.pumpWidget(const GateSmcApp());
 
               expect(find.byType(GateSmcApp), findsOneWidget);
-              expect(find.text('Gate.io SMC PRO'), findsOneWidget);
+              expect(find.text('SMC FUTURES AI TRADER'), findsOneWidget);
             });
           }
           EOF
