@@ -28,7 +28,9 @@ class NotificationService {
     await _plugin.show(
       id: notificationId,
       title: '${signal.side} • ${signal.contract}',
-      body: 'Entry ${signal.entry}  |  SL ${signal.stop}  |  TP ${signal.tp}',
+      body:
+          'Entry ${signal.entry} | SL ${signal.stop} | '
+          'TP1 ${signal.tp1} / TP2 ${signal.tp2} / TP3 ${signal.tp3}',
       notificationDetails: const NotificationDetails(
         android: AndroidNotificationDetails(
           'smc_signal_alerts',

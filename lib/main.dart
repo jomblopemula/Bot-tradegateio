@@ -20,12 +20,37 @@ class GateSmcApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'Gate SMC Pro',
+      title: 'SMC FUTURES AI TRADER',
       theme: ThemeData(
         brightness: Brightness.dark,
-        colorSchemeSeed: Colors.teal,
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xFFC4E86B),
+          brightness: Brightness.dark,
+          surface: const Color(0xFF101715),
+        ),
         useMaterial3: true,
-        scaffoldBackgroundColor: const Color(0xFF081014),
+        scaffoldBackgroundColor: const Color(0xFF090E0C),
+        appBarTheme: const AppBarTheme(
+          backgroundColor: Color(0xFF090E0C),
+          surfaceTintColor: Colors.transparent,
+        ),
+        tabBarTheme: const TabBarThemeData(
+          indicatorColor: Color(0xFFC4E86B),
+          labelColor: Color(0xFFC4E86B),
+          unselectedLabelColor: Color(0xFF91A098),
+        ),
+        inputDecorationTheme: InputDecorationTheme(
+          filled: true,
+          fillColor: const Color(0xFF111916),
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(8),
+            borderSide: const BorderSide(color: Color(0xFF29362F)),
+          ),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(8),
+            borderSide: const BorderSide(color: Color(0xFF29362F)),
+          ),
+        ),
       ),
       home: const HomePage(),
     );
@@ -41,9 +66,11 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage> {
   static const storage = FlutterSecureStorage();
+  static const intervals = ['1m', '5m', '15m', '30m', '1h', '4h', '1d'];
 
   final apiKey = TextEditingController();
   final apiSecret = TextEditingController();
+  final marketSearch = TextEditingController();
 
   // Default sesuai kebutuhan:
   // 2% modal/equity per posisi
@@ -52,7 +79,7 @@ class _HomePageState extends State<HomePage> {
   // Risk reward 1:3
   final rr = TextEditingController(text: '3');
 
-  final maxPos = TextEditingController(text: '3');
+  final maxPos = TextEditingController(text: '5');
 
   // Scan setiap 60 detik
   final scan = TextEditingController(text: '60');
@@ -64,12 +91,15 @@ class _HomePageState extends State<HomePage> {
   bool notificationPermissionGranted = false;
 
   int leverage = 15;
+  String selectedInterval = '15m';
 
   double equity = 0;
+  double availableBalance = 0;
 
   String status = 'Belum terhubung';
 
   Timer? timer;
+  bool scanInProgress = false;
 
   GateApi? api;
 
@@ -78,10 +108,18 @@ class _HomePageState extends State<HomePage> {
 
   final logs = <String>[];
   final signals = <Signal>[];
-  final chartSnapshots = <_ChartSnapshot>[];
-  String? selectedChartId;
+  final favoriteMarkets = <String>{};
+  List<ContractInfo> markets = [];
+  List<Candle> chartCandles = [];
+  String selectedMarket = 'BTC_USDT';
+  Signal? chartSignal;
+  bool chartLoading = false;
+  String? chartError;
+  bool showFavoritesOnly = false;
+  int _chartRequestId = 0;
 
   List<PositionInfo> positions = [];
+  final processedSignalIds = <String>{};
 
   // ============================================================
   // LOG
@@ -114,6 +152,26 @@ class _HomePageState extends State<HomePage> {
     dryRun = (await storage.read(key: 'dry_run')) != 'false';
     notificationsEnabled =
         (await storage.read(key: 'notifications_enabled')) != 'false';
+    selectedInterval = await storage.read(key: 'interval') ?? '15m';
+    if (!intervals.contains(selectedInterval)) selectedInterval = '15m';
+    selectedMarket = await storage.read(key: 'selected_market') ?? 'BTC_USDT';
+    final savedFavorites = await storage.read(key: 'favorite_markets');
+    favoriteMarkets
+      ..clear()
+      ..addAll(
+        (savedFavorites ?? '').split(',').where((symbol) => symbol.isNotEmpty),
+      );
+    processedSignalIds.addAll(
+      (await storage.read(key: 'processed_signal_ids') ?? '')
+          .split('\n')
+          .where((id) => id.isNotEmpty),
+    );
+    api?.dispose();
+    api = GateApi(
+      apiKey: apiKey.text.trim(),
+      apiSecret: apiSecret.text.trim(),
+      testnet: testnet,
+    );
 
     await notificationService.initialize();
     if (notificationsEnabled) {
@@ -124,6 +182,7 @@ class _HomePageState extends State<HomePage> {
     if (!mounted) return;
 
     setState(() {});
+    unawaited(refreshMarkets());
   }
 
   @override
@@ -131,6 +190,230 @@ class _HomePageState extends State<HomePage> {
     super.initState();
 
     loadSaved();
+  }
+
+  Future<void> refreshMarkets() async {
+    final currentApi = api;
+    if (currentApi == null) return;
+
+    try {
+      final fetchedMarkets = await currentApi.contracts();
+      if (!mounted) return;
+
+      setState(() {
+        markets = fetchedMarkets;
+        if (!fetchedMarkets.any((market) => market.name == selectedMarket)) {
+          selectedMarket = fetchedMarkets
+              .firstWhere(
+                (market) => market.name == 'BTC_USDT',
+                orElse: () => fetchedMarkets.firstWhere(
+                  (market) => market.isActive,
+                  orElse: () => fetchedMarkets.first,
+                ),
+              )
+              .name;
+        }
+        chartError = fetchedMarkets.isEmpty
+            ? 'No futures markets available.'
+            : null;
+      });
+      if (fetchedMarkets.isNotEmpty) unawaited(loadSelectedChart());
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => chartError = 'Market load failed: $error');
+    }
+  }
+
+  Future<void> loadSelectedChart() async {
+    final currentApi = api;
+    if (currentApi == null || selectedMarket.isEmpty) return;
+
+    final requestId = ++_chartRequestId;
+    final market = selectedMarket;
+    final interval = selectedInterval;
+    if (mounted) {
+      setState(() {
+        chartLoading = true;
+        chartError = null;
+        chartSignal = null;
+        chartCandles = [];
+      });
+    }
+
+    try {
+      final candles = await currentApi.candles(market, interval, limit: 220);
+      if (!mounted || requestId != _chartRequestId) return;
+
+      final contract = markets.firstWhere(
+        (item) => item.name == market,
+        orElse: () => ContractInfo(
+          name: market,
+          quantoMultiplier: 1,
+          orderSizeMin: 1,
+          orderSizeMax: 0,
+          markPrice: candles.isEmpty ? 0 : candles.last.close,
+          state: 'unknown',
+        ),
+      );
+      final signal = contract.isActive && equity > 0
+          ? engine.analyze(
+              contract: market,
+              candles: candles,
+              equity: equity,
+              info: contract,
+              riskPercent: settings.riskPercent,
+              rr: settings.rr,
+            )
+          : null;
+
+      setState(() {
+        chartCandles = candles;
+        chartSignal = signal;
+        chartLoading = false;
+        chartError = candles.isEmpty
+            ? 'No candles returned for $market.'
+            : null;
+      });
+    } catch (error) {
+      if (!mounted || requestId != _chartRequestId) return;
+      setState(() {
+        chartLoading = false;
+        chartError = 'Candle load failed: $error';
+      });
+    }
+  }
+
+  Future<void> setChartInterval(String interval) async {
+    if (selectedInterval == interval) return;
+    setState(() => selectedInterval = interval);
+    await storage.write(key: 'interval', value: interval);
+    await loadSelectedChart();
+  }
+
+  Future<void> _toggleFavorite(String market) async {
+    setState(() {
+      if (!favoriteMarkets.add(market)) favoriteMarkets.remove(market);
+    });
+    await storage.write(
+      key: 'favorite_markets',
+      value: favoriteMarkets.join(','),
+    );
+  }
+
+  Future<void> _pickMarket() async {
+    marketSearch.clear();
+    final selected = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF101715),
+      builder: (sheetContext) {
+        return StatefulBuilder(
+          builder: (context, setSheetState) {
+            final query = marketSearch.text.trim().toUpperCase();
+            final filteredMarkets =
+                markets.where((market) {
+                  final matchesQuery =
+                      query.isEmpty ||
+                      market.name.toUpperCase().contains(query);
+                  final matchesFavorite =
+                      !showFavoritesOnly ||
+                      favoriteMarkets.contains(market.name);
+                  return matchesQuery && matchesFavorite;
+                }).toList()..sort((left, right) {
+                  if (left.isActive != right.isActive) {
+                    return left.isActive ? -1 : 1;
+                  }
+                  return left.name.compareTo(right.name);
+                });
+
+            return SafeArea(
+              child: SizedBox(
+                height: MediaQuery.sizeOf(context).height * 0.82,
+                child: Column(
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+                      child: TextField(
+                        controller: marketSearch,
+                        autofocus: true,
+                        onChanged: (_) => setSheetState(() {}),
+                        decoration: const InputDecoration(
+                          prefixIcon: Icon(Icons.search),
+                          hintText: 'Search USDT perpetual markets',
+                        ),
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      child: Row(
+                        children: [
+                          Text('${filteredMarkets.length} markets'),
+                          const Spacer(),
+                          FilterChip(
+                            label: const Text('Favorites'),
+                            selected: showFavoritesOnly,
+                            onSelected: (value) {
+                              setState(() => showFavoritesOnly = value);
+                              setSheetState(() {});
+                            },
+                          ),
+                        ],
+                      ),
+                    ),
+                    Expanded(
+                      child: ListView.builder(
+                        itemCount: filteredMarkets.length,
+                        itemBuilder: (context, index) {
+                          final market = filteredMarkets[index];
+                          final favorite = favoriteMarkets.contains(
+                            market.name,
+                          );
+                          return ListTile(
+                            title: Text(market.name),
+                            subtitle: Text(
+                              market.isActive ? 'ACTIVE' : 'NON ACTIVE',
+                              style: TextStyle(
+                                color: market.isActive
+                                    ? const Color(0xFFC4E86B)
+                                    : const Color(0xFFFF8C7A),
+                                fontSize: 11,
+                              ),
+                            ),
+                            trailing: IconButton(
+                              tooltip: favorite
+                                  ? 'Remove favorite'
+                                  : 'Add favorite',
+                              onPressed: () async {
+                                await _toggleFavorite(market.name);
+                                setSheetState(() {});
+                              },
+                              icon: Icon(
+                                favorite ? Icons.star : Icons.star_border,
+                                color: favorite
+                                    ? const Color(0xFFC4E86B)
+                                    : null,
+                              ),
+                            ),
+                            onTap: () =>
+                                Navigator.pop(sheetContext, market.name),
+                          );
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+    marketSearch.clear();
+    if (selected == null || selected == selectedMarket) return;
+
+    setState(() => selectedMarket = selected);
+    await storage.write(key: 'selected_market', value: selected);
+    await loadSelectedChart();
   }
 
   // ============================================================
@@ -147,6 +430,8 @@ class _HomePageState extends State<HomePage> {
 
       await storage.write(key: 'dry_run', value: '$dryRun');
 
+      await storage.write(key: 'interval', value: selectedInterval);
+
       api?.dispose();
 
       api = GateApi(
@@ -160,6 +445,8 @@ class _HomePageState extends State<HomePage> {
       final acc = await api!.futuresAccount();
 
       equity = double.tryParse('${acc['total'] ?? acc['available'] ?? 0}') ?? 0;
+      availableBalance =
+          double.tryParse('${acc['available'] ?? acc['total'] ?? 0}') ?? 0;
 
       positions = await api!.positions();
 
@@ -192,8 +479,9 @@ class _HomePageState extends State<HomePage> {
       riskPercent: double.tryParse(risk.text) ?? 2,
       rr: double.tryParse(rr.text) ?? 3,
       leverage: leverage,
-      maxPositions: int.tryParse(maxPos.text) ?? 3,
+      maxPositions: int.tryParse(maxPos.text) ?? 5,
       scanSeconds: int.tryParse(scan.text) ?? 60,
+      interval: selectedInterval,
     );
   }
 
@@ -315,9 +603,10 @@ class _HomePageState extends State<HomePage> {
   // ============================================================
 
   Future<void> scanOnce() async {
-    if (api == null) {
+    if (api == null || scanInProgress) {
       return;
     }
+    scanInProgress = true;
 
     try {
       // --------------------------------------------------------
@@ -325,7 +614,18 @@ class _HomePageState extends State<HomePage> {
       // --------------------------------------------------------
 
       final list = await api!.contracts();
-      log('Market scan: ${list.length} active contracts');
+      final activeMarkets = list
+          .where((contract) => contract.isActive)
+          .toList();
+      log('Market scan: ${activeMarkets.length} active / ${list.length} total');
+
+      final account = await api!.futuresAccount();
+      equity =
+          double.tryParse('${account['total'] ?? account['available'] ?? 0}') ??
+          0;
+      availableBalance =
+          double.tryParse('${account['available'] ?? account['total'] ?? 0}') ??
+          0;
 
       // --------------------------------------------------------
       // GET POSITIONS
@@ -355,7 +655,7 @@ class _HomePageState extends State<HomePage> {
       // BATCH SCAN
       // --------------------------------------------------------
 
-      final batch = list.take(30).toList();
+      final batch = activeMarkets;
 
       for (final c in batch) {
         if (!running) {
@@ -367,6 +667,7 @@ class _HomePageState extends State<HomePage> {
           continue;
         }
 
+        var orderSubmitted = false;
         try {
           // ----------------------------------------------------
           // GET CANDLES
@@ -391,33 +692,37 @@ class _HomePageState extends State<HomePage> {
             continue;
           }
 
+          final closedCandle = candles[candles.length - 2];
+          final signalId =
+              '${c.name}|${settings.interval}|'
+              '${closedCandle.time.toUtc().millisecondsSinceEpoch}|${signal.side}';
+          if (!processedSignalIds.add(signalId)) {
+            continue;
+          }
+          if (processedSignalIds.length > 500) {
+            processedSignalIds.remove(processedSignalIds.first);
+          }
+          await storage.write(
+            key: 'processed_signal_ids',
+            value: processedSignalIds.join('\n'),
+          );
+
           // ----------------------------------------------------
           // SAVE SIGNAL
           // ----------------------------------------------------
 
           signals.insert(0, signal);
 
-          final chartSnapshot = _ChartSnapshot(
-            id: '${signal.contract}-${DateTime.now().microsecondsSinceEpoch}',
-            signal: signal,
-            candles: List.unmodifiable(candles),
-          );
-          chartSnapshots.insert(0, chartSnapshot);
-          selectedChartId = chartSnapshot.id;
-
           if (signals.length > 30) {
             signals.removeLast();
-          }
-          if (chartSnapshots.length > 30) {
-            chartSnapshots.removeLast();
           }
 
           log(
             '${signal.side} ${signal.contract} '
             'Entry ${signal.entry} '
             'SL ${signal.stop} '
-            'TP ${signal.tp} '
-            'score ${signal.score}%',
+            'TP1 ${signal.tp1} TP2 ${signal.tp2} TP3 ${signal.tp3} '
+            'setup ${signal.score}/100',
           );
 
           if (notificationsEnabled && notificationPermissionGranted) {
@@ -452,6 +757,19 @@ class _HomePageState extends State<HomePage> {
             break;
           }
 
+          final estimatedMargin =
+              signal.size *
+              signal.entry *
+              c.quantoMultiplier /
+              settings.leverage;
+          if (availableBalance <= 0 || estimatedMargin > availableBalance) {
+            log(
+              'ORDER SKIPPED ${signal.contract}: '
+              'insufficient available balance',
+            );
+            continue;
+          }
+
           // ----------------------------------------------------
           // SET ISOLATED LEVERAGE
           // ----------------------------------------------------
@@ -478,19 +796,55 @@ class _HomePageState extends State<HomePage> {
             sl: signal.stop,
             clientId: id,
           );
+          orderSubmitted = true;
+          final orderId = '${result['id'] ?? ''}';
+          if (orderId.isEmpty) {
+            throw StateError('Gate.io did not return an order id');
+          }
+          final verifiedOrder = await api!.orderStatus(
+            contract: signal.contract,
+            orderId: orderId,
+          );
+          positions = await api!.positions();
+          final matchingPosition = positions.where(
+            (position) =>
+                position.contract == signal.contract &&
+                (signal.side == 'BUY' ? position.size > 0 : position.size < 0),
+          );
+          final orderSize =
+              double.tryParse('${verifiedOrder['size'] ?? 0}')?.abs() ?? 0;
+          final orderLeft =
+              double.tryParse('${verifiedOrder['left'] ?? orderSize}')?.abs() ??
+              orderSize;
+          final filledSize = (orderSize - orderLeft).clamp(0, orderSize);
+          if (matchingPosition.isEmpty || filledSize <= 0) {
+            timer?.cancel();
+            running = false;
+            if (mounted) {
+              setState(() => status = 'SAFE MODE • Order fill not verified');
+            }
+            log(
+              'SAFE MODE ${signal.contract}: '
+              'order ${verifiedOrder['status'] ?? 'unknown'} not confirmed',
+            );
+            break;
+          }
 
           log(
-            'ORDER SENT ${signal.contract}: '
-            '${result['id'] ?? result}',
+            'ORDER VERIFIED ${signal.contract}: '
+            'id $orderId • filled $filledSize',
           );
-
-          // ----------------------------------------------------
-          // REFRESH POSITIONS
-          // ----------------------------------------------------
-
-          positions = await api!.positions();
         } catch (e) {
           log('SCAN ${c.name}: $e');
+          if (orderSubmitted) {
+            timer?.cancel();
+            running = false;
+            if (mounted) {
+              setState(() => status = 'SAFE MODE • Order verification failed');
+            }
+            log('SAFE MODE: order result could not be reconciled');
+            break;
+          }
         }
 
         if (positions.length >= settings.maxPositions) {
@@ -506,7 +860,16 @@ class _HomePageState extends State<HomePage> {
 
       setState(() {});
     } catch (e) {
-      log('BOT ERROR: $e');
+      timer?.cancel();
+      if (mounted) {
+        setState(() {
+          running = false;
+          status = 'SAFE MODE • Account/position sync failed';
+        });
+      }
+      log('SAFE MODE: $e');
+    } finally {
+      scanInProgress = false;
     }
   }
 
@@ -522,6 +885,7 @@ class _HomePageState extends State<HomePage> {
 
     apiKey.dispose();
     apiSecret.dispose();
+    marketSearch.dispose();
     risk.dispose();
     rr.dispose();
     maxPos.dispose();
@@ -540,11 +904,13 @@ class _HomePageState extends State<HomePage> {
       length: 5,
       child: Scaffold(
         appBar: AppBar(
-          title: const Text('Gate.io SMC PRO'),
+          title: const Text('SMC FUTURES AI TRADER'),
           actions: [
             Icon(
-              running ? Icons.play_circle : Icons.stop_circle,
-              color: running ? Colors.greenAccent : Colors.redAccent,
+              running ? Icons.monitor_heart : Icons.circle_outlined,
+              color: running
+                  ? const Color(0xFFC4E86B)
+                  : const Color(0xFF75847A),
             ),
             const SizedBox(width: 12),
           ],
@@ -582,6 +948,61 @@ class _HomePageState extends State<HomePage> {
       child: ListView(
         padding: const EdgeInsets.all(16),
         children: [
+          _card(
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'ANALYSIS TIMEFRAME',
+                  style: TextStyle(
+                    color: Color(0xFFB2C0B8),
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 1,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: Row(
+                    children: intervals.map((interval) {
+                      final selected = interval == selectedInterval;
+                      return Padding(
+                        padding: const EdgeInsets.only(right: 7),
+                        child: ChoiceChip(
+                          label: Text(interval.toUpperCase()),
+                          selected: selected,
+                          showCheckmark: false,
+                          onSelected: (_) => setChartInterval(interval),
+                          labelStyle: TextStyle(
+                            color: selected
+                                ? const Color(0xFF11170E)
+                                : const Color(0xFFB2C0B8),
+                            fontWeight: FontWeight.w700,
+                          ),
+                          selectedColor: const Color(0xFFC4E86B),
+                          backgroundColor: const Color(0xFF1A241F),
+                          side: BorderSide.none,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(7),
+                          ),
+                        ),
+                      );
+                    }).toList(),
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  'Closed candle  •  minimum setup ${SmcEngine.minimumSetupScore}/100',
+                  style: const TextStyle(
+                    color: Color(0xFF91A098),
+                    fontSize: 12,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 12),
           _card(
             Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -676,14 +1097,16 @@ class _HomePageState extends State<HomePage> {
 
                 const SizedBox(height: 8),
 
-                const Text(
-                  '15m closed candle • '
-                  'EMA200 • '
-                  'Liquidity Sweep • '
-                  'BOS • '
-                  'FVG proxy • '
-                  'ATR SL • '
-                  'RR 1:3',
+                const Text('EMA200 • Liquidity sweep • BOS • FVG • ATR levels'),
+
+                const SizedBox(height: 8),
+
+                Text(
+                  '${selectedInterval.toUpperCase()} closed candle  •  Setup minimum ${SmcEngine.minimumSetupScore}/100',
+                  style: const TextStyle(
+                    color: Color(0xFF91A098),
+                    fontSize: 12,
+                  ),
                 ),
 
                 const SizedBox(height: 8),
@@ -704,6 +1127,46 @@ class _HomePageState extends State<HomePage> {
           ),
 
           const SizedBox(height: 12),
+
+          if (signals.isNotEmpty) ...[
+            const Padding(
+              padding: EdgeInsets.only(left: 2, bottom: 8),
+              child: Text(
+                'LATEST SETUPS',
+                style: TextStyle(
+                  color: Color(0xFFB2C0B8),
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 1,
+                ),
+              ),
+            ),
+            ...signals
+                .take(3)
+                .map(
+                  (signal) => _card(
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: Icon(
+                        signal.side == 'BUY'
+                            ? Icons.north_east
+                            : Icons.south_east,
+                        color: signal.side == 'BUY'
+                            ? const Color(0xFFC4E86B)
+                            : const Color(0xFFFF8C7A),
+                      ),
+                      title: Text('${signal.contract}  •  ${signal.side}'),
+                      subtitle: Text(
+                        'Entry ${signal.entry}  /  SL ${signal.stop}  /  TP1 ${signal.tp1}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      trailing: _scoreBadge(signal.score),
+                    ),
+                  ),
+                ),
+            const SizedBox(height: 4),
+          ],
 
           // ----------------------------------------------------
           // LOG
@@ -757,11 +1220,11 @@ class _HomePageState extends State<HomePage> {
             subtitle: Text(
               'Entry ${signal.entry}\n'
               'SL ${signal.stop}  '
-              'TP ${signal.tp}\n'
+              'TP1 ${signal.tp1}  TP2 ${signal.tp2}  TP3 ${signal.tp3}\n'
               'Risk ${signal.riskAmount.toStringAsFixed(3)} USDT '
               '• Size ${signal.size}',
             ),
-            trailing: Text('${signal.score}%'),
+            trailing: _scoreBadge(signal.score),
           ),
         );
       },
@@ -769,56 +1232,144 @@ class _HomePageState extends State<HomePage> {
   }
 
   Widget _chart() {
-    if (chartSnapshots.isEmpty) {
-      return const Center(
-        child: Text('Chart akan tersedia setelah bot menemukan signal.'),
-      );
-    }
-
-    final snapshot = chartSnapshots.firstWhere(
-      (item) => item.id == selectedChartId,
-      orElse: () => chartSnapshots.first,
-    );
-
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
-        DropdownButtonFormField<String>(
-          initialValue: snapshot.id,
-          decoration: const InputDecoration(labelText: 'Signal'),
-          items: chartSnapshots
-              .map(
-                (item) => DropdownMenuItem(
-                  value: item.id,
-                  child: Text('${item.signal.contract} • ${item.signal.side}'),
+        Row(
+          children: [
+            Expanded(
+              child: OutlinedButton.icon(
+                onPressed: markets.isEmpty ? refreshMarkets : _pickMarket,
+                icon: const Icon(Icons.search),
+                label: Text(
+                  markets.isEmpty ? 'LOAD MARKETS' : selectedMarket,
+                  overflow: TextOverflow.ellipsis,
                 ),
-              )
-              .toList(),
-          onChanged: (value) {
-            setState(() => selectedChartId = value);
-          },
+                style: OutlinedButton.styleFrom(
+                  alignment: Alignment.centerLeft,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 14,
+                  ),
+                  side: const BorderSide(color: Color(0xFF29362F)),
+                ),
+              ),
+            ),
+            IconButton(
+              tooltip: 'Refresh market and chart',
+              onPressed: refreshMarkets,
+              icon: const Icon(Icons.refresh),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: Row(
+            children: intervals
+                .map(
+                  (interval) => Padding(
+                    padding: const EdgeInsets.only(right: 6),
+                    child: ChoiceChip(
+                      label: Text(interval.toUpperCase()),
+                      selected: selectedInterval == interval,
+                      showCheckmark: false,
+                      onSelected: (_) => setChartInterval(interval),
+                      labelStyle: TextStyle(
+                        color: selectedInterval == interval
+                            ? const Color(0xFF11170E)
+                            : const Color(0xFFB2C0B8),
+                        fontWeight: FontWeight.w700,
+                      ),
+                      selectedColor: const Color(0xFFC4E86B),
+                      backgroundColor: const Color(0xFF1A241F),
+                      side: BorderSide.none,
+                    ),
+                  ),
+                )
+                .toList(),
+          ),
         ),
         const SizedBox(height: 12),
         Row(
           children: [
             Expanded(
               child: Text(
-                '${snapshot.signal.contract}  ${snapshot.signal.side}',
+                '$selectedMarket  •  ${selectedInterval.toUpperCase()}',
                 style: const TextStyle(fontWeight: FontWeight.bold),
               ),
             ),
-            Text('${snapshot.signal.score}%'),
+            if (chartCandles.isNotEmpty)
+              Text(
+                chartCandles.last.close.toString(),
+                style: const TextStyle(
+                  color: Color(0xFFC4E86B),
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
           ],
         ),
+        if (chartLoading) ...[
+          const SizedBox(height: 8),
+          const LinearProgressIndicator(minHeight: 2),
+        ],
         const SizedBox(height: 8),
+        if (chartError != null)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Text(
+              chartError!,
+              style: const TextStyle(color: Color(0xFFFF8C7A), fontSize: 12),
+            ),
+          ),
         SizedBox(
           height: 360,
-          child: SmcCandlestickChart(
-            candles: snapshot.candles,
-            signal: snapshot.signal,
-          ),
+          child: chartCandles.isEmpty
+              ? Center(
+                  child: chartLoading
+                      ? const CircularProgressIndicator()
+                      : const Text('Select a market to load its chart.'),
+                )
+              : SmcCandlestickChart(candles: chartCandles, signal: chartSignal),
         ),
         const SizedBox(height: 12),
+        if (chartSignal case final signal?)
+          _card(
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        '${signal.side} SETUP',
+                        style: const TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                    ),
+                    _scoreBadge(signal.score),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'Entry ${signal.entry}  •  SL ${signal.stop}\n'
+                  'TP1 ${signal.tp1}  •  TP2 ${signal.tp2}  •  TP3 ${signal.tp3}',
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  signal.reasons.join('  •  '),
+                  style: const TextStyle(
+                    color: Color(0xFF91A098),
+                    fontSize: 12,
+                  ),
+                ),
+              ],
+            ),
+          )
+        else if (chartCandles.isNotEmpty)
+          const Text(
+            'Chart uses closed candles. No eligible setup is available for this market yet.',
+            style: TextStyle(color: Color(0xFF91A098), fontSize: 12),
+          ),
         Wrap(
           spacing: 16,
           runSpacing: 8,
@@ -829,8 +1380,6 @@ class _HomePageState extends State<HomePage> {
             _chartLegend('EMA 200', const Color(0xFFFFD166)),
           ],
         ),
-        const SizedBox(height: 8),
-        Text(snapshot.signal.reasons.join(' • ')),
       ],
     );
   }
@@ -931,6 +1480,24 @@ class _HomePageState extends State<HomePage> {
         _field('Max positions', maxPos, keyboard: TextInputType.number),
 
         _field('Scan seconds', scan, keyboard: TextInputType.number),
+
+        DropdownButtonFormField<String>(
+          initialValue: selectedInterval,
+          decoration: const InputDecoration(labelText: 'Analysis timeframe'),
+          items: intervals
+              .map(
+                (interval) => DropdownMenuItem(
+                  value: interval,
+                  child: Text(interval.toUpperCase()),
+                ),
+              )
+              .toList(),
+          onChanged: (value) {
+            if (value != null) unawaited(setChartInterval(value));
+          },
+        ),
+
+        const SizedBox(height: 12),
 
         // ------------------------------------------------------
         // LEVERAGE
@@ -1075,10 +1642,35 @@ class _HomePageState extends State<HomePage> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(title, style: const TextStyle(fontSize: 11)),
+        Text(
+          title,
+          style: const TextStyle(
+            fontSize: 10,
+            color: Color(0xFF91A098),
+            fontWeight: FontWeight.w600,
+          ),
+        ),
         const SizedBox(height: 3),
         Text(value, style: const TextStyle(fontWeight: FontWeight.bold)),
       ],
+    );
+  }
+
+  Widget _scoreBadge(int score) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+      decoration: BoxDecoration(
+        color: const Color(0xFFC4E86B).withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Text(
+        '$score/100',
+        style: const TextStyle(
+          color: Color(0xFFC4E86B),
+          fontWeight: FontWeight.bold,
+          fontSize: 12,
+        ),
+      ),
     );
   }
 
@@ -1088,20 +1680,14 @@ class _HomePageState extends State<HomePage> {
 
   Widget _card(Widget child) {
     return Card(
+      color: const Color(0xFF111916),
+      surfaceTintColor: Colors.transparent,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(8),
+        side: const BorderSide(color: Color(0xFF25332B)),
+      ),
       elevation: 0,
       child: Padding(padding: const EdgeInsets.all(14), child: child),
     );
   }
-}
-
-class _ChartSnapshot {
-  final String id;
-  final Signal signal;
-  final List<Candle> candles;
-
-  const _ChartSnapshot({
-    required this.id,
-    required this.signal,
-    required this.candles,
-  });
 }

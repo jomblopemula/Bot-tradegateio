@@ -4,6 +4,8 @@ import 'models.dart';
 class SmcEngine {
   const SmcEngine();
 
+  static const minimumSetupScore = 80;
+
   double _ema(List<double> x, int n) {
     if (x.isEmpty) return 0;
     final a = 2 / (n + 1);
@@ -18,13 +20,18 @@ class SmcEngine {
     if (c.length < n + 1) return 0;
     final tr = <double>[];
     for (var i = 1; i < c.length; i++) {
-      tr.add(max(c[i].high - c[i].low,
-          max((c[i].high - c[i - 1].close).abs(),
-              (c[i].low - c[i - 1].close).abs())));
+      tr.add(
+        max(
+          c[i].high - c[i].low,
+          max(
+            (c[i].high - c[i - 1].close).abs(),
+            (c[i].low - c[i - 1].close).abs(),
+          ),
+        ),
+      );
     }
     final start = max(0, tr.length - n);
-    return tr.sublist(start).reduce((a, b) => a + b) /
-        tr.sublist(start).length;
+    return tr.sublist(start).reduce((a, b) => a + b) / tr.sublist(start).length;
   }
 
   Signal? analyze({
@@ -69,23 +76,15 @@ class SmcEngine {
     final bearTrend = last.close < ema200;
 
     String? side;
-    final reasons = <String>[];
-    if (bullTrend) reasons.add('EMA200 bullish');
-    if (bearTrend) reasons.add('EMA200 bearish');
-    if (bullishSweep) reasons.add('liquidity sweep low');
-    if (bearishSweep) reasons.add('liquidity sweep high');
-    if (bullishBos) reasons.add('BOS up');
-    if (bearishBos) reasons.add('BOS down');
-    if (bullishFvg) reasons.add('FVG up');
-    if (bearishFvg) reasons.add('FVG down');
-
-    if (bullTrend && bullishSweep && bullishBos) {
+    if (bullTrend && bullishBos) {
       side = 'BUY';
-    } else if (bearTrend && bearishSweep && bearishBos) {
+    } else if (bearTrend && bearishBos) {
       side = 'SELL';
     } else {
       return null;
     }
+
+    if (rr <= 0) return null;
 
     final entry = last.close;
     final stop = side == 'BUY'
@@ -94,9 +93,34 @@ class SmcEngine {
     final riskDistance = (entry - stop).abs();
     if (riskDistance <= 0) return null;
 
-    final tp = side == 'BUY'
-        ? entry + riskDistance * rr
-        : entry - riskDistance * rr;
+    final direction = side == 'BUY' ? 1 : -1;
+    final tp1 = entry + direction * riskDistance;
+    final tp2 = entry + direction * riskDistance * 2;
+    final tp3 = entry + direction * riskDistance * rr;
+
+    final alignedSweep = side == 'BUY' ? bullishSweep : bearishSweep;
+    final alignedFvg = side == 'BUY' ? bullishFvg : bearishFvg;
+    final score = min(
+      100,
+      25 +
+          25 +
+          (alignedSweep ? 25 : 0) +
+          (alignedFvg ? 15 : 0) +
+          (rr >= 2 ? 10 : 0),
+    );
+    if (score < minimumSetupScore) return null;
+
+    final reasons = <String>[
+      side == 'BUY' ? 'EMA200 bullish (+25)' : 'EMA200 bearish (+25)',
+      side == 'BUY' ? 'BOS up (+25)' : 'BOS down (+25)',
+      if (alignedSweep)
+        side == 'BUY'
+            ? 'Liquidity sweep low (+25)'
+            : 'Liquidity sweep high (+25)',
+      if (alignedFvg) side == 'BUY' ? 'Bullish FVG (+15)' : 'Bearish FVG (+15)',
+      if (rr >= 2)
+        'Risk/reward 1:${rr.toStringAsFixed(rr == rr.roundToDouble() ? 0 : 1)} (+10)',
+    ];
 
     // For linear USDT contracts, approximate risk per contract using
     // the contract's quanto multiplier. Gate currently exposes size
@@ -108,26 +132,19 @@ class SmcEngine {
     var size = riskAmount / riskPerContract;
     if (info.orderSizeMin > 0) {
       size = (size / info.orderSizeMin).floor() * info.orderSizeMin;
-      if (size < info.orderSizeMin) size = info.orderSizeMin;
+      if (size < info.orderSizeMin) return null;
     }
     if (info.orderSizeMax > 0) size = min(size, info.orderSizeMax);
     if (size <= 0) return null;
-
-    final score = min(
-      100,
-      35 +
-          (bullTrend || bearTrend ? 20 : 0) +
-          ((bullishSweep || bearishSweep) ? 20 : 0) +
-          ((bullishBos || bearishBos) ? 20 : 0) +
-          ((bullishFvg || bearishFvg) ? 5 : 0),
-    );
 
     return Signal(
       contract: contract,
       side: side,
       entry: entry,
       stop: stop,
-      tp: tp,
+      tp1: tp1,
+      tp2: tp2,
+      tp3: tp3,
       riskAmount: riskAmount,
       size: size,
       score: score,

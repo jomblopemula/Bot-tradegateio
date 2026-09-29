@@ -9,13 +9,16 @@ A Flutter Android dashboard for Gate.io USDT perpetual futures.
 - Secure storage for API key/secret.
 - HMAC-SHA512 Gate API v4 signing.
 - USDT perpetual contracts discovery.
-- 15-minute closed-candle SMC-style engine:
+- Searchable Gate.io USDT perpetual market selector with favorites and active/inactive labels.
+- Market chart loads independently of signal generation; timeframe choices: 1m, 5m, 15m, 30m, 1h, 4h, and 1d (default 15m).
+- Configurable closed-candle SMC-style engine:
   - EMA200 trend
   - liquidity sweep proxy
   - BOS proxy
   - FVG proxy
   - ATR-based stop
   - RR configurable, default 1:3
+- Setup confluence score from 0-100; only scores of 80 or higher generate signals.
 - Risk per position, default 2% of reported futures equity.
 - Isolated leverage, default 15x.
 - Max open positions.
@@ -30,6 +33,7 @@ A Flutter Android dashboard for Gate.io USDT perpetual futures.
 
 This is a serious trading prototype, not a guarantee of profitability.
 The SMC rules are deterministic proxies, not a certified reproduction of any discretionary trader.
+The setup score is a rule-based confluence rating, not a win probability or accuracy guarantee.
 
 Do not put withdrawal permission on the Gate API key.
 For first testing use Gate TESTNET and DRY-RUN.
@@ -232,7 +236,7 @@ DRY-RUN = true
 risk = 2%
 RR = 3
 leverage = 15x isolated
-max positions = 3
+max positions = 5
 scan = 60 seconds
 interval = 15m
 

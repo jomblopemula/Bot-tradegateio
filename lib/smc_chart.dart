@@ -6,7 +6,7 @@ import 'models.dart';
 
 class SmcCandlestickChart extends StatelessWidget {
   final List<Candle> candles;
-  final Signal signal;
+  final Signal? signal;
 
   const SmcCandlestickChart({
     super.key,
@@ -32,7 +32,7 @@ class SmcCandlestickChart extends StatelessWidget {
 
 class _SmcChartPainter extends CustomPainter {
   final List<Candle> candles;
-  final Signal signal;
+  final Signal? signal;
 
   const _SmcChartPainter(this.candles, this.signal);
 
@@ -61,11 +61,23 @@ class _SmcChartPainter extends CustomPainter {
     final emaValues = _ema(candles, 200);
     var minPrice = visible.map((candle) => candle.low).reduce(math.min);
     var maxPrice = visible.map((candle) => candle.high).reduce(math.max);
-    for (final level in [signal.entry, signal.stop, signal.tp]) {
-      minPrice = math.min(minPrice, level);
-      maxPrice = math.max(maxPrice, level);
+    final selectedSignal = signal;
+    if (selectedSignal != null) {
+      for (final level in [
+        selectedSignal.entry,
+        selectedSignal.stop,
+        selectedSignal.tp1,
+        selectedSignal.tp2,
+        selectedSignal.tp3,
+      ]) {
+        minPrice = math.min(minPrice, level);
+        maxPrice = math.max(maxPrice, level);
+      }
     }
-    final padding = math.max((maxPrice - minPrice) * 0.08, maxPrice.abs() * 0.0005);
+    final padding = math.max(
+      (maxPrice - minPrice) * 0.08,
+      maxPrice.abs() * 0.0005,
+    );
     minPrice -= padding;
     maxPrice += padding;
     if (maxPrice <= minPrice) maxPrice = minPrice + 1;
@@ -135,15 +147,50 @@ class _SmcChartPainter extends CustomPainter {
     }
     canvas.drawPath(emaPath, emaPaint);
 
-    _drawSignalLevel(canvas, plot, yFor, signal.entry, _entry, 'ENTRY');
-    _drawSignalLevel(canvas, plot, yFor, signal.stop, _down, 'SL');
-    _drawSignalLevel(canvas, plot, yFor, signal.tp, _target, 'TP');
+    if (selectedSignal != null) {
+      _drawSignalLevel(
+        canvas,
+        plot,
+        yFor,
+        selectedSignal.entry,
+        _entry,
+        'ENTRY',
+      );
+      _drawSignalLevel(canvas, plot, yFor, selectedSignal.stop, _down, 'SL');
+      _drawSignalLevel(canvas, plot, yFor, selectedSignal.tp1, _target, 'TP1');
+      _drawSignalLevel(
+        canvas,
+        plot,
+        yFor,
+        selectedSignal.tp2,
+        _target.withValues(alpha: 0.75),
+        'TP2',
+      );
+      _drawSignalLevel(
+        canvas,
+        plot,
+        yFor,
+        selectedSignal.tp3,
+        _target.withValues(alpha: 0.5),
+        'TP3',
+      );
+    }
     _drawSmcAnnotations(canvas, plot, slotWidth, visibleStart, yFor);
 
-    _drawText(canvas, 'lebih lama', Offset(plot.left, plot.bottom + 7),
-        const Color(0xFFA7B7BA), 9);
-    _drawText(canvas, 'terbaru', Offset(plot.right - 34, plot.bottom + 7),
-        const Color(0xFFA7B7BA), 9);
+    _drawText(
+      canvas,
+      'lebih lama',
+      Offset(plot.left, plot.bottom + 7),
+      const Color(0xFFA7B7BA),
+      9,
+    );
+    _drawText(
+      canvas,
+      'terbaru',
+      Offset(plot.right - 34, plot.bottom + 7),
+      const Color(0xFFA7B7BA),
+      9,
+    );
   }
 
   void _drawSignalLevel(
@@ -188,7 +235,8 @@ class _SmcChartPainter extends CustomPainter {
     final previous = candles[previousIndex];
     final last = candles[lastIndex];
     final bullishSweep = previous.low < priorLow && previous.close > priorLow;
-    final bearishSweep = previous.high > priorHigh && previous.close < priorHigh;
+    final bearishSweep =
+        previous.high > priorHigh && previous.close < priorHigh;
     final bullishBos = last.close > priorHigh;
     final bearishBos = last.close < priorLow;
     final bullishFvg = last.low > candles[closedCount - 3].high;
@@ -222,11 +270,15 @@ class _SmcChartPainter extends CustomPainter {
       final zone = Rect.fromLTRB(x1, yFor(upper), x2, yFor(lower));
       canvas.drawRect(
         zone,
-        Paint()
-          ..color = (bullishFvg ? _up : _down).withValues(alpha: 0.14),
+        Paint()..color = (bullishFvg ? _up : _down).withValues(alpha: 0.14),
       );
-      _drawText(canvas, 'FVG', Offset(x1 + 3, zone.top + 2),
-          bullishFvg ? _up : _down, 9);
+      _drawText(
+        canvas,
+        'FVG',
+        Offset(x1 + 3, zone.top + 2),
+        bullishFvg ? _up : _down,
+        9,
+      );
     }
   }
 

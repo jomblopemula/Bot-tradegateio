@@ -3,7 +3,7 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
-        android:label="gateio_smc_pro"
+        android:label="SMC FUTURES AI TRADER"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity

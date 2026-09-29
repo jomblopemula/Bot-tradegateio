@@ -12,15 +12,16 @@ class Candle {
   });
 
   factory Candle.fromGate(Map<String, dynamic> j) => Candle(
-        time: DateTime.fromMillisecondsSinceEpoch(
-            ((double.tryParse('${j['t']}') ?? 0) * 1000).round(),
-            isUtc: true),
-        open: double.parse('${j['o']}'),
-        high: double.parse('${j['h']}'),
-        low: double.parse('${j['l']}'),
-        close: double.parse('${j['c']}'),
-        volume: double.tryParse('${j['v'] ?? 0}') ?? 0,
-      );
+    time: DateTime.fromMillisecondsSinceEpoch(
+      ((double.tryParse('${j['t']}') ?? 0) * 1000).round(),
+      isUtc: true,
+    ),
+    open: double.parse('${j['o']}'),
+    high: double.parse('${j['h']}'),
+    low: double.parse('${j['l']}'),
+    close: double.parse('${j['c']}'),
+    volume: double.tryParse('${j['v'] ?? 0}') ?? 0,
+  );
 }
 
 class ContractInfo {
@@ -40,32 +41,42 @@ class ContractInfo {
     required this.state,
   });
 
+  bool get isActive {
+    final normalizedState = state.toLowerCase();
+    return normalizedState == 'normal' ||
+        normalizedState == 'trading' ||
+        normalizedState == 'false';
+  }
+
   factory ContractInfo.fromJson(Map<String, dynamic> j) => ContractInfo(
-        name: '${j['name']}',
-        quantoMultiplier:
-            double.tryParse('${j['quanto_multiplier'] ?? 1}') ?? 1,
-        orderSizeMin: double.tryParse('${j['order_size_min'] ?? 1}') ?? 1,
-        orderSizeMax: double.tryParse('${j['order_size_max'] ?? 0}') ?? 0,
-        markPrice: double.tryParse('${j['mark_price'] ?? 0}') ?? 0,
-        state: '${j['status'] ?? j['in_delisting'] ?? 'normal'}',
-      );
+    name: '${j['name']}',
+    quantoMultiplier: double.tryParse('${j['quanto_multiplier'] ?? 1}') ?? 1,
+    orderSizeMin: double.tryParse('${j['order_size_min'] ?? 1}') ?? 1,
+    orderSizeMax: double.tryParse('${j['order_size_max'] ?? 0}') ?? 0,
+    markPrice: double.tryParse('${j['mark_price'] ?? 0}') ?? 0,
+    state: '${j['status'] ?? j['in_delisting'] ?? 'normal'}',
+  );
 }
 
 class Signal {
   final String contract;
   final String side;
-  final double entry, stop, tp;
+  final double entry, stop, tp1, tp2, tp3;
   final double riskAmount;
   final double size;
   final int score;
   final List<String> reasons;
+
+  double get tp => tp3;
 
   const Signal({
     required this.contract,
     required this.side,
     required this.entry,
     required this.stop,
-    required this.tp,
+    required this.tp1,
+    required this.tp2,
+    required this.tp3,
     required this.riskAmount,
     required this.size,
     required this.score,
@@ -93,15 +104,14 @@ class PositionInfo {
   });
 
   factory PositionInfo.fromJson(Map<String, dynamic> j) => PositionInfo(
-        contract: '${j['contract']}',
-        size: double.tryParse('${j['size'] ?? 0}') ?? 0,
-        entryPrice: double.tryParse('${j['entry_price'] ?? 0}') ?? 0,
-        markPrice: double.tryParse('${j['mark_price'] ?? 0}') ?? 0,
-        unrealisedPnl:
-            double.tryParse('${j['unrealised_pnl'] ?? 0}') ?? 0,
-        leverage: '${j['lever'] ?? j['leverage'] ?? '0'}',
-        marginMode: '${j['pos_margin_mode'] ?? 'unknown'}',
-      );
+    contract: '${j['contract']}',
+    size: double.tryParse('${j['size'] ?? 0}') ?? 0,
+    entryPrice: double.tryParse('${j['entry_price'] ?? 0}') ?? 0,
+    markPrice: double.tryParse('${j['mark_price'] ?? 0}') ?? 0,
+    unrealisedPnl: double.tryParse('${j['unrealised_pnl'] ?? 0}') ?? 0,
+    leverage: '${j['lever'] ?? j['leverage'] ?? '0'}',
+    marginMode: '${j['pos_margin_mode'] ?? 'unknown'}',
+  );
 }
 
 class BotSettings {
@@ -120,7 +130,7 @@ class BotSettings {
     this.riskPercent = 2.0,
     this.rr = 3.0,
     this.leverage = 15,
-    this.maxPositions = 3,
+    this.maxPositions = 5,
     this.interval = '15m',
     this.scanSeconds = 60,
   });
@@ -134,15 +144,14 @@ class BotSettings {
     int? maxPositions,
     String? interval,
     int? scanSeconds,
-  }) =>
-      BotSettings(
-        testnet: testnet ?? this.testnet,
-        dryRun: dryRun ?? this.dryRun,
-        riskPercent: riskPercent ?? this.riskPercent,
-        rr: rr ?? this.rr,
-        leverage: leverage ?? this.leverage,
-        maxPositions: maxPositions ?? this.maxPositions,
-        interval: interval ?? this.interval,
-        scanSeconds: scanSeconds ?? this.scanSeconds,
-      );
+  }) => BotSettings(
+    testnet: testnet ?? this.testnet,
+    dryRun: dryRun ?? this.dryRun,
+    riskPercent: riskPercent ?? this.riskPercent,
+    rr: rr ?? this.rr,
+    leverage: leverage ?? this.leverage,
+    maxPositions: maxPositions ?? this.maxPositions,
+    interval: interval ?? this.interval,
+    scanSeconds: scanSeconds ?? this.scanSeconds,
+  );
 }

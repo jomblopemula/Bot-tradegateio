@@ -24,22 +24,25 @@ class GateApi {
     http.Client? client,
   }) : _client = client ?? http.Client();
 
-  String get base =>
-    testnet
-        ? 'https://fx-api-testnet.gateio.ws/api/v4'
-        : 'https://fx-api.gateio.ws/api/v4';
+  String get base => testnet
+      ? 'https://fx-api-testnet.gateio.ws/api/v4'
+      : 'https://fx-api.gateio.ws/api/v4';
 
   String _sha512(String s) => sha512.convert(utf8.encode(s)).toString();
 
   Map<String, String> _headers(
-      String method, String path, String query, String body) {
+    String method,
+    String path,
+    String query,
+    String body,
+  ) {
     final ts = (DateTime.now().millisecondsSinceEpoch ~/ 1000).toString();
     final payloadHash = _sha512(body);
-    final signString =
-        '$method\n/api/v4$path\n$query\n$payloadHash\n$ts';
-    final sign = Hmac(sha512, utf8.encode(apiSecret))
-        .convert(utf8.encode(signString))
-        .toString();
+    final signString = '$method\n/api/v4$path\n$query\n$payloadHash\n$ts';
+    final sign = Hmac(
+      sha512,
+      utf8.encode(apiSecret),
+    ).convert(utf8.encode(signString)).toString();
 
     return {
       'Accept': 'application/json',
@@ -59,11 +62,15 @@ class GateApi {
     bool auth = false,
   }) async {
     final queryString = query.entries
-        .map((e) =>
-            '${Uri.encodeQueryComponent(e.key)}=${Uri.encodeQueryComponent(e.value)}')
+        .map(
+          (e) =>
+              '${Uri.encodeQueryComponent(e.key)}=${Uri.encodeQueryComponent(e.value)}',
+        )
         .join('&');
     final bodyText = body == null ? '' : jsonEncode(body);
-    final uri = Uri.parse('$base$path${queryString.isEmpty ? '' : '?$queryString'}');
+    final uri = Uri.parse(
+      '$base$path${queryString.isEmpty ? '' : '?$queryString'}',
+    );
     final headers = auth
         ? _headers(method, path, queryString, bodyText)
         : {
@@ -97,16 +104,14 @@ class GateApi {
     final data = await _request('GET', '/futures/usdt/contracts');
     return (data as List)
         .map((e) => ContractInfo.fromJson(e as Map<String, dynamic>))
-        .where((c) =>
-            c.state == 'normal' ||
-            c.state == 'trading' ||
-            c.state == 'true' ||
-            c.state == 'false')
         .toList();
   }
 
-  Future<List<Candle>> candles(String contract, String interval,
-      {int limit = 220}) async {
+  Future<List<Candle>> candles(
+    String contract,
+    String interval, {
+    int limit = 220,
+  }) async {
     final data = await _request(
       'GET',
       '/futures/usdt/candlesticks',
@@ -121,7 +126,8 @@ class GateApi {
 
   Future<Map<String, dynamic>> futuresAccount() async =>
       Map<String, dynamic>.from(
-          await _request('GET', '/futures/usdt/accounts', auth: true));
+        await _request('GET', '/futures/usdt/accounts', auth: true),
+      );
 
   Future<List<PositionInfo>> positions() async {
     final data = await _request('GET', '/futures/usdt/positions', auth: true);
@@ -130,6 +136,18 @@ class GateApi {
         .where((p) => p.size != 0)
         .toList();
   }
+
+  Future<Map<String, dynamic>> orderStatus({
+    required String contract,
+    required String orderId,
+  }) async => Map<String, dynamic>.from(
+    await _request(
+      'GET',
+      '/futures/usdt/orders/$orderId',
+      query: {'contract': contract},
+      auth: true,
+    ),
+  );
 
   Future<void> setIsolatedLeverage(String contract, int leverage) async {
     await _request(
@@ -158,12 +176,9 @@ class GateApi {
       'tpsl_sl_trigger_price': sl.toString(),
       'market_order_slip_ratio': '0.03',
     };
-    return Map<String, dynamic>.from(await _request(
-      'POST',
-      '/futures/usdt/orders',
-      body: body,
-      auth: true,
-    ));
+    return Map<String, dynamic>.from(
+      await _request('POST', '/futures/usdt/orders', body: body, auth: true),
+    );
   }
 
   Future<Map<String, dynamic>> closePosition(String contract) async {
@@ -175,12 +190,9 @@ class GateApi {
       'reduce_only': true,
       'close': true,
     };
-    return Map<String, dynamic>.from(await _request(
-      'POST',
-      '/futures/usdt/orders',
-      body: body,
-      auth: true,
-    ));
+    return Map<String, dynamic>.from(
+      await _request('POST', '/futures/usdt/orders', body: body, auth: true),
+    );
   }
 
   Future<bool> testConnection() async {
