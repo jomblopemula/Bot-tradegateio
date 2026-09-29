@@ -1,13 +1,17 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import 'gate_api.dart';
+import 'gate_stream.dart';
 import 'models.dart';
 import 'notification_service.dart';
+import 'order_manager.dart';
 import 'smc_chart.dart';
 import 'smc_engine.dart';
+import 'package:web_socket_channel/web_socket_channel.dart';
 
 void main() {
   runApp(const GateSmcApp());
@@ -115,8 +119,19 @@ class _HomePageState extends State<HomePage> {
   Signal? chartSignal;
   bool chartLoading = false;
   String? chartError;
+  String chartFeedStatus = 'REST';
+  bool chartRealtimeConnected = false;
   bool showFavoritesOnly = false;
   int _chartRequestId = 0;
+  WebSocketChannel? _candleChannel;
+  StreamSubscription<dynamic>? _candleSubscription;
+  Timer? _candlePingTimer;
+  Timer? _candleSubscribeTimer;
+  Timer? _candleReconnectTimer;
+  Timer? _candleFallbackTimer;
+  int _candleReconnectAttempts = 0;
+  bool _restFallbackInProgress = false;
+  bool _disposed = false;
 
   List<PositionInfo> positions = [];
   final processedSignalIds = <String>{};
@@ -139,6 +154,81 @@ class _HomePageState extends State<HomePage> {
       }
     });
   }
+
+  String _safeErrorDetails(Object error) {
+    var detail = error is GateApiException
+        ? error.diagnostic
+        : error.toString();
+    for (final secret in [apiKey.text.trim(), apiSecret.text.trim()]) {
+      if (secret.isNotEmpty) detail = detail.replaceAll(secret, '[REDACTED]');
+    }
+    if (detail.length > 280) detail = '${detail.substring(0, 280)}...';
+    return detail;
+  }
+
+  void logError(
+    String operation,
+    Object error, {
+    String? contract,
+    String? orderId,
+  }) {
+    final detail = _safeErrorDetails(error);
+    final context = [
+      if (contract != null) 'contract=$contract',
+      if (orderId != null) 'order=$orderId',
+    ].join(' ');
+    log('ERROR [$operation]${context.isEmpty ? '' : ' $context'}: $detail');
+  }
+
+  Future<OrderFillVerification> _verifyOrderWithRetries({
+    required String contract,
+    required String orderId,
+    required String side,
+  }) async {
+    final currentApi = api;
+    if (currentApi == null) return _inconclusiveOrderVerification();
+
+    var latest = _inconclusiveOrderVerification();
+    for (var attempt = 0; attempt < 3; attempt++) {
+      try {
+        final order = await currentApi.orderStatus(
+          contract: contract,
+          orderId: orderId,
+        );
+        positions = await currentApi.positions();
+        latest = verifyFuturesOrder(
+          order: order,
+          positions: positions,
+          contract: contract,
+          side: side,
+        );
+        log(
+          'ORDER CHECK ${attempt + 1}/3 $contract: ${latest.state.name} '
+          'status=${latest.orderStatus} finish=${latest.finishAs} '
+          'filled=${latest.filledSize} position=${latest.matchingPositionFound}',
+        );
+        if (!latest.shouldRetry) return latest;
+      } catch (error) {
+        logError('order.verify', error, contract: contract, orderId: orderId);
+      }
+
+      if (attempt < 2) {
+        await Future<void>.delayed(Duration(milliseconds: 300 * (attempt + 1)));
+      }
+    }
+    return latest;
+  }
+
+  OrderFillVerification _inconclusiveOrderVerification() =>
+      const OrderFillVerification(
+        state: OrderFillState.inconclusive,
+        orderStatus: 'unknown',
+        finishAs: 'unknown',
+        orderSize: null,
+        leftSize: null,
+        filledSize: 0,
+        matchingPositionFound: false,
+      );
 
   // ============================================================
   // LOAD SETTINGS
@@ -231,12 +321,15 @@ class _HomePageState extends State<HomePage> {
     final requestId = ++_chartRequestId;
     final market = selectedMarket;
     final interval = selectedInterval;
+    _stopCandleStream();
     if (mounted) {
       setState(() {
         chartLoading = true;
         chartError = null;
         chartSignal = null;
         chartCandles = [];
+        chartRealtimeConnected = false;
+        chartFeedStatus = 'CONNECTING';
       });
     }
 
@@ -244,43 +337,259 @@ class _HomePageState extends State<HomePage> {
       final candles = await currentApi.candles(market, interval, limit: 220);
       if (!mounted || requestId != _chartRequestId) return;
 
-      final contract = markets.firstWhere(
-        (item) => item.name == market,
-        orElse: () => ContractInfo(
-          name: market,
-          quantoMultiplier: 1,
-          orderSizeMin: 1,
-          orderSizeMax: 0,
-          markPrice: candles.isEmpty ? 0 : candles.last.close,
-          state: 'unknown',
-        ),
-      );
-      final signal = contract.isActive && equity > 0
-          ? engine.analyze(
-              contract: market,
-              candles: candles,
-              equity: equity,
-              info: contract,
-              riskPercent: settings.riskPercent,
-              rr: settings.rr,
-            )
-          : null;
-
       setState(() {
         chartCandles = candles;
-        chartSignal = signal;
+        chartSignal = _analyzeChart(candles, market);
         chartLoading = false;
         chartError = candles.isEmpty
             ? 'No candles returned for $market.'
             : null;
       });
+      unawaited(_connectCandleStream(market, interval, requestId));
     } catch (error) {
       if (!mounted || requestId != _chartRequestId) return;
       setState(() {
         chartLoading = false;
         chartError = 'Candle load failed: $error';
+        chartFeedStatus = 'CONNECTING';
+      });
+      logError('candles.history', error, contract: market);
+      unawaited(_connectCandleStream(market, interval, requestId));
+    }
+  }
+
+  Signal? _analyzeChart(List<Candle> candles, String market) {
+    if (equity <= 0) return null;
+    final contract = markets.firstWhere(
+      (item) => item.name == market,
+      orElse: () => ContractInfo(
+        name: market,
+        quantoMultiplier: 1,
+        orderSizeMin: 1,
+        orderSizeMax: 0,
+        markPrice: candles.isEmpty ? 0 : candles.last.close,
+        state: 'unknown',
+      ),
+    );
+    if (!contract.isActive) return null;
+    return engine.analyze(
+      contract: market,
+      candles: candles,
+      equity: equity,
+      info: contract,
+      riskPercent: settings.riskPercent,
+      rr: settings.rr,
+    );
+  }
+
+  Future<void> _connectCandleStream(
+    String market,
+    String interval,
+    int requestId,
+  ) async {
+    if (_disposed || !mounted || requestId != _chartRequestId) return;
+
+    final socketUrl = testnet
+        ? 'wss://fx-ws-testnet.gateio.ws/v4/ws/usdt'
+        : 'wss://fx-ws.gateio.ws/v4/ws/usdt';
+    WebSocketChannel? channel;
+    try {
+      channel = WebSocketChannel.connect(Uri.parse(socketUrl));
+      _candleChannel = channel;
+      await channel.ready.timeout(const Duration(seconds: 10));
+      if (_disposed || !mounted || requestId != _chartRequestId) {
+        if (identical(_candleChannel, channel)) _candleChannel = null;
+        await channel.sink.close();
+        return;
+      }
+
+      channel.sink.add(
+        jsonEncode({
+          'time': DateTime.now().millisecondsSinceEpoch ~/ 1000,
+          'channel': 'futures.candlesticks',
+          'event': 'subscribe',
+          'payload': [interval, market],
+        }),
+      );
+      _candlePingTimer?.cancel();
+      _candlePingTimer = Timer.periodic(const Duration(seconds: 20), (_) {
+        if (!identical(_candleChannel, channel)) return;
+        try {
+          channel!.sink.add(
+            jsonEncode({
+              'time': DateTime.now().millisecondsSinceEpoch ~/ 1000,
+              'channel': 'futures.ping',
+            }),
+          );
+        } catch (error) {
+          logError('candles.websocket.ping', error, contract: market);
+          _scheduleCandleReconnect(market, interval, requestId, channel);
+        }
+      });
+      _candleSubscribeTimer?.cancel();
+      _candleSubscribeTimer = Timer(const Duration(seconds: 10), () {
+        if (requestId == _chartRequestId && !chartRealtimeConnected) {
+          _scheduleCandleReconnect(market, interval, requestId, channel);
+        }
+      });
+      _candleSubscription = channel.stream.listen(
+        (message) => _handleCandleFrame(
+          message,
+          market: market,
+          interval: interval,
+          requestId: requestId,
+        ),
+        onError: (Object error) {
+          logError('candles.websocket', error, contract: market);
+          _scheduleCandleReconnect(market, interval, requestId, channel!);
+        },
+        onDone: () =>
+            _scheduleCandleReconnect(market, interval, requestId, channel!),
+        cancelOnError: true,
+      );
+    } catch (error) {
+      if (channel != null) unawaited(channel.sink.close());
+      if (requestId == _chartRequestId) {
+        logError('candles.websocket.connect', error, contract: market);
+        _scheduleCandleReconnect(market, interval, requestId, channel);
+      }
+    }
+  }
+
+  void _handleCandleFrame(
+    Object message, {
+    required String market,
+    required String interval,
+    required int requestId,
+  }) {
+    if (!mounted || requestId != _chartRequestId) return;
+    final frame = parseGateCandlestickFrame(
+      message,
+      contract: market,
+      interval: interval,
+    );
+    if (frame.subscriptionError != null) {
+      logError(
+        'candles.websocket.subscribe',
+        StateError(frame.subscriptionError!),
+        contract: market,
+      );
+      _scheduleCandleReconnect(market, interval, requestId, _candleChannel);
+      return;
+    }
+    if (frame.subscribed || frame.candles.isNotEmpty) {
+      _candleReconnectAttempts = 0;
+      _candleReconnectTimer?.cancel();
+      _candleSubscribeTimer?.cancel();
+      _candleFallbackTimer?.cancel();
+      setState(() {
+        chartRealtimeConnected = true;
+        chartFeedStatus = 'REALTIME';
       });
     }
+    if (frame.candles.isEmpty) return;
+
+    final candles = mergeGateCandles(chartCandles, frame.candles);
+    setState(() {
+      chartCandles = candles;
+      chartSignal = _analyzeChart(candles, market);
+      chartError = null;
+    });
+  }
+
+  void _scheduleCandleReconnect(
+    String market,
+    String interval,
+    int requestId,
+    WebSocketChannel? sourceChannel,
+  ) {
+    if (_disposed || !mounted || requestId != _chartRequestId) return;
+    if (sourceChannel != null && !identical(_candleChannel, sourceChannel)) {
+      return;
+    }
+    _candlePingTimer?.cancel();
+    _candleSubscribeTimer?.cancel();
+    final subscription = _candleSubscription;
+    _candleSubscription = null;
+    if (subscription != null) unawaited(subscription.cancel());
+    _candleChannel = null;
+    if (sourceChannel != null) unawaited(sourceChannel.sink.close());
+    if (mounted) {
+      setState(() {
+        chartRealtimeConnected = false;
+        chartFeedStatus = 'REST FALLBACK · RECONNECTING';
+      });
+    }
+    _startCandleRestFallback(market, interval, requestId);
+    if (_candleReconnectTimer?.isActive ?? false) return;
+
+    const delays = [1, 2, 4, 8, 16, 30];
+    final delayIndex = _candleReconnectAttempts
+        .clamp(0, delays.length - 1)
+        .toInt();
+    final delay = delays[delayIndex];
+    _candleReconnectAttempts++;
+    _candleReconnectTimer = Timer(Duration(seconds: delay), () {
+      unawaited(_connectCandleStream(market, interval, requestId));
+    });
+  }
+
+  void _startCandleRestFallback(String market, String interval, int requestId) {
+    if (_candleFallbackTimer?.isActive ?? false) return;
+    _candleFallbackTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+      unawaited(_pollLatestCandles(market, interval, requestId));
+    });
+    unawaited(_pollLatestCandles(market, interval, requestId));
+  }
+
+  Future<void> _pollLatestCandles(
+    String market,
+    String interval,
+    int requestId,
+  ) async {
+    if (_restFallbackInProgress ||
+        chartRealtimeConnected ||
+        requestId != _chartRequestId) {
+      return;
+    }
+    final currentApi = api;
+    if (currentApi == null) return;
+    _restFallbackInProgress = true;
+    try {
+      final updates = await currentApi.candles(market, interval, limit: 3);
+      if (!mounted ||
+          requestId != _chartRequestId ||
+          chartRealtimeConnected ||
+          updates.isEmpty) {
+        return;
+      }
+      final candles = mergeGateCandles(chartCandles, updates);
+      setState(() {
+        chartCandles = candles;
+        chartSignal = _analyzeChart(candles, market);
+        chartError = null;
+        chartFeedStatus = 'REST FALLBACK';
+      });
+    } catch (error) {
+      if (requestId == _chartRequestId) {
+        logError('candles.rest-fallback', error, contract: market);
+      }
+    } finally {
+      _restFallbackInProgress = false;
+    }
+  }
+
+  void _stopCandleStream() {
+    _candlePingTimer?.cancel();
+    _candleSubscribeTimer?.cancel();
+    _candleReconnectTimer?.cancel();
+    _candleFallbackTimer?.cancel();
+    final subscription = _candleSubscription;
+    _candleSubscription = null;
+    if (subscription != null) unawaited(subscription.cancel());
+    final channel = _candleChannel;
+    _candleChannel = null;
+    if (channel != null) unawaited(channel.sink.close());
   }
 
   Future<void> setChartInterval(String interval) async {
@@ -433,6 +742,7 @@ class _HomePageState extends State<HomePage> {
       await storage.write(key: 'interval', value: selectedInterval);
 
       api?.dispose();
+      _stopCandleStream();
 
       api = GateApi(
         apiKey: apiKey.text.trim(),
@@ -457,14 +767,15 @@ class _HomePageState extends State<HomePage> {
       });
 
       log('Connection OK • ${testnet ? 'TESTNET' : 'LIVE'}');
+      unawaited(refreshMarkets());
     } catch (e) {
       if (!mounted) return;
 
       setState(() {
-        status = 'Gagal: $e';
+        status = 'Gagal: ${_safeErrorDetails(e)}';
       });
 
-      log('ERROR: $e');
+      logError('connection.test', e);
     }
   }
 
@@ -668,6 +979,7 @@ class _HomePageState extends State<HomePage> {
         }
 
         var orderSubmitted = false;
+        var stage = 'candles.fetch';
         try {
           // ----------------------------------------------------
           // GET CANDLES
@@ -679,6 +991,7 @@ class _HomePageState extends State<HomePage> {
           // SMC ENGINE
           // ----------------------------------------------------
 
+          stage = 'signal.analyze';
           final signal = engine.analyze(
             contract: c.name,
             candles: candles,
@@ -702,6 +1015,7 @@ class _HomePageState extends State<HomePage> {
           if (processedSignalIds.length > 500) {
             processedSignalIds.remove(processedSignalIds.first);
           }
+          stage = 'signal.persist';
           await storage.write(
             key: 'processed_signal_ids',
             value: processedSignalIds.join('\n'),
@@ -774,6 +1088,7 @@ class _HomePageState extends State<HomePage> {
           // SET ISOLATED LEVERAGE
           // ----------------------------------------------------
 
+          stage = 'leverage.set';
           await api!.setIsolatedLeverage(signal.contract, settings.leverage);
 
           // ----------------------------------------------------
@@ -789,6 +1104,8 @@ class _HomePageState extends State<HomePage> {
           // PLACE MARKET ORDER
           // ----------------------------------------------------
 
+          stage = 'order.submit';
+          orderSubmitted = true;
           final result = await api!.placeMarketOrder(
             contract: signal.contract,
             size: signedSize,
@@ -796,46 +1113,48 @@ class _HomePageState extends State<HomePage> {
             sl: signal.stop,
             clientId: id,
           );
-          orderSubmitted = true;
           final orderId = '${result['id'] ?? ''}';
           if (orderId.isEmpty) {
             throw StateError('Gate.io did not return an order id');
           }
-          final verifiedOrder = await api!.orderStatus(
+          stage = 'order.verify';
+          final verification = await _verifyOrderWithRetries(
             contract: signal.contract,
             orderId: orderId,
+            side: signal.side,
           );
-          positions = await api!.positions();
-          final matchingPosition = positions.where(
-            (position) =>
-                position.contract == signal.contract &&
-                (signal.side == 'BUY' ? position.size > 0 : position.size < 0),
-          );
-          final orderSize =
-              double.tryParse('${verifiedOrder['size'] ?? 0}')?.abs() ?? 0;
-          final orderLeft =
-              double.tryParse('${verifiedOrder['left'] ?? orderSize}')?.abs() ??
-              orderSize;
-          final filledSize = (orderSize - orderLeft).clamp(0, orderSize);
-          if (matchingPosition.isEmpty || filledSize <= 0) {
+
+          if (verification.state == OrderFillState.noFill) {
+            log(
+              'ORDER NO FILL ${signal.contract}: '
+              'finish=${verification.finishAs} '
+              'status=${verification.orderStatus}',
+            );
+            continue;
+          }
+
+          if (!verification.isVerifiedFill) {
             timer?.cancel();
             running = false;
             if (mounted) {
-              setState(() => status = 'SAFE MODE • Order fill not verified');
+              setState(
+                () => status = 'SAFE MODE • Order/position inconclusive',
+              );
             }
             log(
-              'SAFE MODE ${signal.contract}: '
-              'order ${verifiedOrder['status'] ?? 'unknown'} not confirmed',
+              'SAFE MODE ${signal.contract}: order $orderId '
+              'could not be reconciled after 3 attempts',
             );
             break;
           }
 
           log(
-            'ORDER VERIFIED ${signal.contract}: '
-            'id $orderId • filled $filledSize',
+            'ORDER VERIFIED ${signal.contract}: id $orderId '
+            'state=${verification.state.name} '
+            'filled=${verification.filledSize}',
           );
         } catch (e) {
-          log('SCAN ${c.name}: $e');
+          logError(stage, e, contract: c.name);
           if (orderSubmitted) {
             timer?.cancel();
             running = false;
@@ -867,7 +1186,8 @@ class _HomePageState extends State<HomePage> {
           status = 'SAFE MODE • Account/position sync failed';
         });
       }
-      log('SAFE MODE: $e');
+      logError('account.position.reconcile', e);
+      log('SAFE MODE: scanner paused after account/position sync failure');
     } finally {
       scanInProgress = false;
     }
@@ -879,6 +1199,9 @@ class _HomePageState extends State<HomePage> {
 
   @override
   void dispose() {
+    _disposed = true;
+    _chartRequestId++;
+    _stopCandleStream();
     timer?.cancel();
 
     api?.dispose();
@@ -1308,6 +1631,17 @@ class _HomePageState extends State<HomePage> {
                 ),
               ),
           ],
+        ),
+        const SizedBox(height: 4),
+        Text(
+          chartFeedStatus,
+          style: TextStyle(
+            color: chartRealtimeConnected
+                ? const Color(0xFFC4E86B)
+                : const Color(0xFFE7B96E),
+            fontSize: 10,
+            fontWeight: FontWeight.w700,
+          ),
         ),
         if (chartLoading) ...[
           const SizedBox(height: 8),

@@ -11,6 +11,7 @@ A Flutter Android dashboard for Gate.io USDT perpetual futures.
 - USDT perpetual contracts discovery.
 - Searchable Gate.io USDT perpetual market selector with favorites and active/inactive labels.
 - Market chart loads independently of signal generation; timeframe choices: 1m, 5m, 15m, 30m, 1h, 4h, and 1d (default 15m).
+- Live selected-market candles via Gate Futures WebSocket, with reconnect backoff and automatic REST polling fallback while disconnected.
 - Configurable closed-candle SMC-style engine:
   - EMA200 trend
   - liquidity sweep proxy

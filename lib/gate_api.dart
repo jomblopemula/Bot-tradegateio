@@ -7,8 +7,23 @@ class GateApiException implements Exception {
   final int status;
   final String message;
   GateApiException(this.status, this.message);
+
+  String get diagnostic {
+    try {
+      final body = jsonDecode(message);
+      if (body is Map) {
+        final label = '${body['label'] ?? 'API_ERROR'}';
+        final detail = '${body['message'] ?? body['detail'] ?? ''}'.trim();
+        return detail.isEmpty ? label : '$label: $detail';
+      }
+    } on FormatException {
+      // Preserve a bounded plain-text response below.
+    }
+    return message;
+  }
+
   @override
-  String toString() => 'Gate API $status: $message';
+  String toString() => 'Gate API $status: $diagnostic';
 }
 
 class GateApi {
